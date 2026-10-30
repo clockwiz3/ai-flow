@@ -29,6 +29,7 @@ class ToolResultBlock(BaseModel):
     tool_use_id: str
     content: str
     is_error: bool = False
+    cache: bool = False
 
 
 Block = Annotated[TextBlock | ToolUseBlock | ToolResultBlock, Field(discriminator="type")]
@@ -41,6 +42,13 @@ class Message(BaseModel):
     @classmethod
     def user(cls, text: str, *, cache: bool = False) -> Message:
         return cls(role="user", content=[TextBlock(text=text, cache=cache)])
+
+    def with_cache_breakpoint(self) -> Message:
+        """A copy whose last block marks the end of the cacheable prefix."""
+        if not self.content or isinstance(self.content[-1], ToolUseBlock):
+            return self
+        last = self.content[-1].model_copy(update={"cache": True})
+        return self.model_copy(update={"content": [*self.content[:-1], last]})
 
     @property
     def text(self) -> str:

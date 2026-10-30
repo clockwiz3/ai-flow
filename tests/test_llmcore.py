@@ -220,3 +220,17 @@ def test_llm_calls_nest_under_the_current_span(tmp_path: Path) -> None:
     assert spans["step-1"]["parent_id"] == spans["implementer"]["id"]
     assert spans["step-1"]["attrs"]["cost_usd"] == pytest.approx(0.001)
     assert spans["step-1"]["attrs"]["cache_read_tokens"] == 60
+
+
+def test_rolling_cache_breakpoint_marks_the_newest_tool_result() -> None:
+    msg = Message(
+        role="user",
+        content=[ToolResultBlock(tool_use_id="a", content="x"), ToolResultBlock(tool_use_id="b", content="y")],
+    )
+    marked = msg.with_cache_breakpoint()
+    assert [b.cache for b in marked.content] == [False, True]  # type: ignore[union-attr]
+    assert not any(b.cache for b in msg.content)  # type: ignore[union-attr]
+    wire = to_wire("anthropic/claude-x", [], [marked])
+    assert wire[0]["content"] == "x"
+    assert wire[1]["content"] == [{"type": "text", "text": "y", "cache_control": {"type": "ephemeral"}}]
+    assert to_wire("deepseek/d", [], [marked])[1]["content"] == "y"

@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import asyncio
+import io
 import os
+import sys
 import uuid
 from pathlib import Path
 from typing import Annotated
@@ -28,6 +30,9 @@ RUNS = Path("runs")
 @app.callback()
 def main() -> None:
     """ForgeLoop: ticket -> plan -> code -> gates -> PR, with an eval of what each gate buys."""
+    for stream in (sys.stdout, sys.stderr):  # Windows consoles default to a legacy code page
+        if isinstance(stream, io.TextIOWrapper):
+            stream.reconfigure(encoding="utf-8", errors="replace")
 
 
 async def _solve(

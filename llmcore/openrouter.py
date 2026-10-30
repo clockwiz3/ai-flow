@@ -53,7 +53,10 @@ def to_wire(model: str, system: list[TextBlock], messages: list[Message]) -> lis
         for block in msg.content:
             if isinstance(block, ToolResultBlock):
                 content = f"ERROR: {block.content}" if block.is_error else block.content
-                out.append({"role": "tool", "tool_call_id": block.tool_use_id, "content": content})
+                wire: str | list[dict[str, Any]] = content
+                if cache and block.cache:
+                    wire = [{"type": "text", "text": content, "cache_control": {"type": "ephemeral"}}]
+                out.append({"role": "tool", "tool_call_id": block.tool_use_id, "content": wire})
             elif isinstance(block, TextBlock):
                 texts.append(_text_part(block, cache))
         if texts:

@@ -144,9 +144,11 @@ class AgentLoop:
                 result.messages = messages
                 result.compactions += 1
             try:
+                # A rolling breakpoint on the newest block: the whole history so far is read from the provider
+                # cache on the next turn instead of being billed in full again.
                 response = await self.client.create(
                     cfg.model,
-                    messages,
+                    [*messages[:-1], messages[-1].with_cache_breakpoint()],
                     system=system,
                     tools=specs,
                     fallback_models=cfg.fallback_models,

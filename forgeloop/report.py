@@ -20,7 +20,7 @@ def summary_table(records: list[RunRecord]) -> str:
         by_config[r.config].append(r)
     configs = sorted(by_config, key=lambda c: (CONFIG_ORDER.index(c) if c in CONFIG_ORDER else 99, c))
     lines = [
-        "| config | runs | pass@1 (solvable) | ambiguous → escalated | wrong escalations | $ / run | steps | $ total |",
+        "| config | runs | pass@1 (solvable) | ambiguous: escalated | wrong escalations | $ / run | steps | $ total |",
         "| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |",
     ]
     for c in configs:
