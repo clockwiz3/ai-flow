@@ -1,41 +1,41 @@
-# Double booking: a longer reservation around an existing one is accepted
+# Same Family Tent handed to two customers
 
 **Reported by:** front desk (Lena)
-**Severity:** high - we handed the same Family Tent to two customers last weekend
+**Severity:** high - two families showed up for the same tent
 
-## What happens
+## What happened
 
-When a customer books an item for a period that starts **before** an existing active
-reservation and ends **after** it, the system says the item is free and lets the booking
-through. The item ends up double-booked.
+Last weekend two customers came to collect the Family Tent (item 6) and we only have one.
+Both had a confirmed booking in the system. I've reproduced it with the demo data:
 
-Shorter bookings that start or end inside an existing reservation are correctly rejected;
-it is only the "wraps around it" case that slips through.
+- Reservation 5 (already in the system, status `active`): Family Tent, 2025-06-10 to
+  2025-06-15.
+- Before booking, I checked the calendar for a customer who wanted the tent from 2025-06-09
+  to 2025-06-16:
 
-## Example (demo data)
+  ```
+  GET /availability?item_id=6&start=2025-06-09&end=2025-06-16
+  ```
 
-Reservation 5 holds the Family Tent (item 6) from 2025-06-10 to 2025-06-15 (status
-`active`).
+  It said `"available": true` with no conflicts, so I booked it:
 
-```
-GET /availability?item_id=6&start=2025-06-09&end=2025-06-16
-```
+  ```
+  POST /reservations
+  {"item_id": 6, "customer_id": 1, "start": "2025-06-09", "end": "2025-06-16"}
+  ```
 
-- **Actual:** `200`, `"available": true`, `"conflicting_reservation_ids": []`
-- **Expected:** `"available": false`, with a reason, and `"conflicting_reservation_ids": [5]`
+  and got `201 Created`.
 
-```
-POST /reservations
-{"item_id": 6, "customer_id": 1, "start": "2025-06-09", "end": "2025-06-16"}
-```
+The tent cannot be with two customers on the same days. The system should have told me it
+was taken (listing reservation 5 as the conflict) and refused the booking.
 
-- **Actual:** `201 Created` (double booking)
-- **Expected:** `409 Conflict`
+Other bookings for that tent that clash with reservation 5 do get refused, so I don't
+understand why this one went through.
 
-## Acceptance criteria
+## Expected
 
-- A requested range that fully contains an existing active reservation of the same item is
-  reported as unavailable by `GET /availability` (listing that reservation as conflicting)
-  and is rejected by `POST /reservations` with 409.
-- Overlap rules otherwise stay as documented in the README (half-open ranges: a booking that
-  ends on the day another starts, or starts on the day another ends, is still allowed).
+- The availability check and the booking endpoint never allow an item to be booked for days
+  on which it is already held by another active reservation, following the reservation rules
+  in the README; the availability answer lists the reservations that are in the way.
+- Back-to-back bookings (one ending on the day the next one starts) must keep working - we
+  rely on them every weekend.

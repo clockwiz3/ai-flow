@@ -1,0 +1,6 @@
+id: bug-03-utilization-undercount
+title: Utilization report undercounts days items were out with customers
+kind: bug
+difficulty: hard
+expected: solve
+tags: [reports, returns, dates]

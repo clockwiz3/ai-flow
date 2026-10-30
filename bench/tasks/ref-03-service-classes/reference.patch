@@ -1,0 +1,1326 @@
+diff --git a/README.md b/README.md
+index 1b28a59..0fc2ab8 100644
+--- a/README.md
++++ b/README.md
+@@ -27,7 +27,8 @@ freshly seeded `Store` and the system clock; tests inject a `FixedClock` pinned
+ | `app/seed.py` | Demo data |
+ | `app/clock.py` | Injectable "today" |
+ | `app/errors.py` | Domain exceptions -> HTTP errors |
+-| `app/services/` | Business rules (catalog, customers, availability, pricing, reservations, returns, invoices, reports) |
++| `app/services/` | Business rules as service classes with constructor injection (`CatalogService`, `CustomerService`, `PricingService`, `AvailabilityService`, `ReservationService`, `ReturnService`, `InvoiceService`, `ReportService`) plus pure pricing / late-fee helpers |
++| `app/api/dependencies.py` | FastAPI providers for the store, the clock and every service (`get_store`, `get_clock`, `get_*_service`) |
+ | `app/api/routes.py` | All HTTP routes |
+ 
+ ## Domain rules
+diff --git a/app/api/dependencies.py b/app/api/dependencies.py
+new file mode 100644
+index 0000000..8469592
+--- /dev/null
++++ b/app/api/dependencies.py
+@@ -0,0 +1,104 @@
++"""FastAPI dependency providers: the store, the clock and every service.
++
++Services are built per request from the providers they depend on, so overriding a provider
++with ``app.dependency_overrides`` (e.g. ``get_clock`` in a test) reaches every service that
++uses it.
++"""
++
++from typing import Annotated
++
++from fastapi import Depends, Request
++
++from app.clock import Clock
++from app.services.availability import AvailabilityService
++from app.services.catalog import CatalogService
++from app.services.customers import CustomerService
++from app.services.invoices import InvoiceService
++from app.services.pricing import PricingService
++from app.services.reports import ReportService
++from app.services.reservations import ReservationService
++from app.services.returns import ReturnService
++from app.storage import Store
++
++
++def get_store(request: Request) -> Store:
++    return request.app.state.store
++
++
++def get_clock(request: Request) -> Clock:
++    return request.app.state.clock
++
++
++StoreDep = Annotated[Store, Depends(get_store)]
++ClockDep = Annotated[Clock, Depends(get_clock)]
++
++
++def get_catalog_service(store: StoreDep) -> CatalogService:
++    return CatalogService(store)
++
++
++CatalogDep = Annotated[CatalogService, Depends(get_catalog_service)]
++
++
++def get_customer_service(store: StoreDep) -> CustomerService:
++    return CustomerService(store)
++
++
++CustomersDep = Annotated[CustomerService, Depends(get_customer_service)]
++
++
++def get_pricing_service(store: StoreDep) -> PricingService:
++    return PricingService(store)
++
++
++PricingDep = Annotated[PricingService, Depends(get_pricing_service)]
++
++
++def get_availability_service(store: StoreDep, catalog: CatalogDep) -> AvailabilityService:
++    return AvailabilityService(store, catalog)
++
++
++AvailabilityDep = Annotated[AvailabilityService, Depends(get_availability_service)]
++
++
++def get_reservation_service(
++    store: StoreDep,
++    clock: ClockDep,
++    catalog: CatalogDep,
++    customers: CustomersDep,
++    pricing: PricingDep,
++    availability: AvailabilityDep,
++) -> ReservationService:
++    return ReservationService(store, clock, catalog, customers, pricing, availability)
++
++
++ReservationsDep = Annotated[ReservationService, Depends(get_reservation_service)]
++
++
++def get_return_service(
++    store: StoreDep, clock: ClockDep, catalog: CatalogDep, reservations: ReservationsDep
++) -> ReturnService:
++    return ReturnService(store, clock, catalog, reservations)
++
++
++ReturnsDep = Annotated[ReturnService, Depends(get_return_service)]
++
++
++def get_invoice_service(
++    store: StoreDep,
++    catalog: CatalogDep,
++    customers: CustomersDep,
++    pricing: PricingDep,
++    reservations: ReservationsDep,
++) -> InvoiceService:
++    return InvoiceService(store, catalog, customers, pricing, reservations)
++
++
++InvoicesDep = Annotated[InvoiceService, Depends(get_invoice_service)]
++
++
++def get_report_service(store: StoreDep, invoices: InvoicesDep) -> ReportService:
++    return ReportService(store, invoices)
++
++
++ReportsDep = Annotated[ReportService, Depends(get_report_service)]
+diff --git a/app/api/routes.py b/app/api/routes.py
+index 10638d4..6ff5500 100644
+--- a/app/api/routes.py
++++ b/app/api/routes.py
+@@ -1,15 +1,26 @@
+ """HTTP routes for every Rentwise resource.
+ 
+-Handlers are thin: they parse input, call the service layer and return models. Domain
+-errors are translated to HTTP responses by the handlers in ``app.errors``.
++Handlers are thin: they parse input, call a service (injected through the providers in
++``app.api.dependencies``) and return models. Domain errors are translated to HTTP
++responses by the handlers in ``app.errors``.
+ """
+ 
+ from datetime import date
+ from typing import Annotated
+ 
+-from fastapi import APIRouter, Depends, Query, Request, status
+-
+-from app.clock import Clock
++from fastapi import APIRouter, Query, status
++
++from app.api.dependencies import (
++    AvailabilityDep,
++    CatalogDep,
++    ClockDep,
++    CustomersDep,
++    InvoicesDep,
++    PricingDep,
++    ReportsDep,
++    ReservationsDep,
++    ReturnsDep,
++)
+ from app.models import (
+     Availability,
+     Category,
+@@ -31,33 +42,11 @@ from app.models import (
+     RevenueReport,
+     UtilizationReport,
+ )
+-from app.services import (
+-    availability,
+-    catalog,
+-    customers,
+-    invoices,
+-    pricing,
+-    reports,
+-    reservations,
+-    returns,
+-)
+-from app.storage import Store
++from app.services.catalog import DEFAULT_PAGE_SIZE, MAX_PAGE_SIZE
+ 
+ router = APIRouter()
+ 
+ 
+-def get_store(request: Request) -> Store:
+-    return request.app.state.store
+-
+-
+-def get_clock(request: Request) -> Clock:
+-    return request.app.state.clock
+-
+-
+-StoreDep = Annotated[Store, Depends(get_store)]
+-ClockDep = Annotated[Clock, Depends(get_clock)]
+-
+-
+ # --- health ----------------------------------------------------------------------------
+ 
+ 
+@@ -70,42 +59,42 @@ def health(clock: ClockDep) -> dict[str, str]:
+ 
+ 
+ @router.get("/categories", response_model=list[Category], tags=["catalog"])
+-def list_categories(store: StoreDep) -> list[Category]:
+-    return catalog.list_categories(store)
++def list_categories(catalog: CatalogDep) -> list[Category]:
++    return catalog.list_categories()
+ 
+ 
+ @router.get("/items", response_model=ItemPage, tags=["catalog"])
+ def list_items(
+-    store: StoreDep,
++    catalog: CatalogDep,
+     q: Annotated[str | None, Query(max_length=100)] = None,
+     category: str | None = None,
+-    limit: Annotated[int, Query(ge=1, le=catalog.MAX_PAGE_SIZE)] = catalog.DEFAULT_PAGE_SIZE,
++    limit: Annotated[int, Query(ge=1, le=MAX_PAGE_SIZE)] = DEFAULT_PAGE_SIZE,
+     offset: Annotated[int, Query(ge=0)] = 0,
+ ) -> ItemPage:
+-    return catalog.list_items(store, q=q, category=category, limit=limit, offset=offset)
++    return catalog.list_items(q=q, category=category, limit=limit, offset=offset)
+ 
+ 
+ @router.post("/items", response_model=Item, status_code=status.HTTP_201_CREATED, tags=["catalog"])
+-def create_item(store: StoreDep, data: ItemCreate) -> Item:
+-    return catalog.create_item(store, data)
++def create_item(catalog: CatalogDep, data: ItemCreate) -> Item:
++    return catalog.create_item(data)
+ 
+ 
+ @router.get("/items/{item_id}", response_model=Item, tags=["catalog"])
+-def get_item(store: StoreDep, item_id: int) -> Item:
+-    return catalog.get_item(store, item_id)
++def get_item(catalog: CatalogDep, item_id: int) -> Item:
++    return catalog.get_item(item_id)
+ 
+ 
+ @router.post("/items/{item_id}/status", response_model=Item, tags=["catalog"])
+-def set_item_status(store: StoreDep, item_id: int, data: ItemStatusUpdate) -> Item:
+-    return catalog.set_item_status(store, item_id, data.status)
++def set_item_status(catalog: CatalogDep, item_id: int, data: ItemStatusUpdate) -> Item:
++    return catalog.set_item_status(item_id, data.status)
+ 
+ 
+ # --- customers -------------------------------------------------------------------------
+ 
+ 
+ @router.get("/customers", response_model=list[Customer], tags=["customers"])
+-def list_customers(store: StoreDep, tier: CustomerTier | None = None) -> list[Customer]:
+-    return customers.list_customers(store, tier=tier)
++def list_customers(customers: CustomersDep, tier: CustomerTier | None = None) -> list[Customer]:
++    return customers.list_customers(tier=tier)
+ 
+ 
+ @router.post(
+@@ -114,36 +103,38 @@ def list_customers(store: StoreDep, tier: CustomerTier | None = None) -> list[Cu
+     status_code=status.HTTP_201_CREATED,
+     tags=["customers"],
+ )
+-def create_customer(store: StoreDep, data: CustomerCreate) -> Customer:
+-    return customers.create_customer(store, data)
++def create_customer(customers: CustomersDep, data: CustomerCreate) -> Customer:
++    return customers.create_customer(data)
+ 
+ 
+ @router.get("/customers/{customer_id}", response_model=Customer, tags=["customers"])
+-def get_customer(store: StoreDep, customer_id: int) -> Customer:
+-    return customers.get_customer(store, customer_id)
++def get_customer(customers: CustomersDep, customer_id: int) -> Customer:
++    return customers.get_customer(customer_id)
+ 
+ 
+ # --- coupons ---------------------------------------------------------------------------
+ 
+ 
+ @router.get("/coupons", response_model=list[Coupon], tags=["pricing"])
+-def list_coupons(store: StoreDep) -> list[Coupon]:
+-    return pricing.list_coupons(store)
++def list_coupons(pricing: PricingDep) -> list[Coupon]:
++    return pricing.list_coupons()
+ 
+ 
+ @router.post(
+     "/coupons", response_model=Coupon, status_code=status.HTTP_201_CREATED, tags=["pricing"]
+ )
+-def create_coupon(store: StoreDep, data: CouponCreate) -> Coupon:
+-    return pricing.create_coupon(store, data)
++def create_coupon(pricing: PricingDep, data: CouponCreate) -> Coupon:
++    return pricing.create_coupon(data)
+ 
+ 
+ # --- availability ----------------------------------------------------------------------
+ 
+ 
+ @router.get("/availability", response_model=Availability, tags=["reservations"])
+-def get_availability(store: StoreDep, item_id: int, start: date, end: date) -> Availability:
+-    return availability.check_availability(store, item_id, start, end)
++def get_availability(
++    availability: AvailabilityDep, item_id: int, start: date, end: date
++) -> Availability:
++    return availability.check_availability(item_id, start, end)
+ 
+ 
+ # --- reservations ----------------------------------------------------------------------
+@@ -151,13 +142,13 @@ def get_availability(store: StoreDep, item_id: int, start: date, end: date) -> A
+ 
+ @router.get("/reservations", response_model=list[Reservation], tags=["reservations"])
+ def list_reservations(
+-    store: StoreDep,
++    reservations: ReservationsDep,
+     customer_id: int | None = None,
+     item_id: int | None = None,
+     status: ReservationStatus | None = None,
+ ) -> list[Reservation]:
+     return reservations.list_reservations(
+-        store, customer_id=customer_id, item_id=item_id, status=status
++        customer_id=customer_id, item_id=item_id, status=status
+     )
+ 
+ 
+@@ -167,13 +158,13 @@ def list_reservations(
+     status_code=status.HTTP_201_CREATED,
+     tags=["reservations"],
+ )
+-def create_reservation(store: StoreDep, clock: ClockDep, data: ReservationCreate) -> Reservation:
+-    return reservations.create_reservation(store, clock, data)
++def create_reservation(reservations: ReservationsDep, data: ReservationCreate) -> Reservation:
++    return reservations.create_reservation(data)
+ 
+ 
+ @router.get("/reservations/{reservation_id}", response_model=Reservation, tags=["reservations"])
+-def get_reservation(store: StoreDep, reservation_id: int) -> Reservation:
+-    return reservations.get_reservation(store, reservation_id)
++def get_reservation(reservations: ReservationsDep, reservation_id: int) -> Reservation:
++    return reservations.get_reservation(reservation_id)
+ 
+ 
+ @router.post(
+@@ -181,8 +172,8 @@ def get_reservation(store: StoreDep, reservation_id: int) -> Reservation:
+     response_model=Reservation,
+     tags=["reservations"],
+ )
+-def cancel_reservation(store: StoreDep, reservation_id: int) -> Reservation:
+-    return reservations.cancel_reservation(store, reservation_id)
++def cancel_reservation(reservations: ReservationsDep, reservation_id: int) -> Reservation:
++    return reservations.cancel_reservation(reservation_id)
+ 
+ 
+ @router.post(
+@@ -191,12 +182,11 @@ def cancel_reservation(store: StoreDep, reservation_id: int) -> Reservation:
+     tags=["reservations"],
+ )
+ def return_reservation(
+-    store: StoreDep,
+-    clock: ClockDep,
++    returns: ReturnsDep,
+     reservation_id: int,
+     data: ReturnRequest | None = None,
+ ) -> ReturnReceipt:
+-    return returns.return_reservation(store, clock, reservation_id, data or ReturnRequest())
++    return returns.return_reservation(reservation_id, data or ReturnRequest())
+ 
+ 
+ @router.get(
+@@ -204,18 +194,18 @@ def return_reservation(
+     response_model=Invoice,
+     tags=["reservations"],
+ )
+-def get_invoice(store: StoreDep, reservation_id: int) -> Invoice:
+-    return invoices.get_invoice(store, reservation_id)
++def get_invoice(invoices: InvoicesDep, reservation_id: int) -> Invoice:
++    return invoices.get_invoice(reservation_id)
+ 
+ 
+ # --- reports ---------------------------------------------------------------------------
+ 
+ 
+ @router.get("/reports/revenue", response_model=RevenueReport, tags=["reports"])
+-def revenue_report(store: StoreDep, start: date, end: date) -> RevenueReport:
+-    return reports.revenue_report(store, start, end)
++def revenue_report(reports: ReportsDep, start: date, end: date) -> RevenueReport:
++    return reports.revenue_report(start, end)
+ 
+ 
+ @router.get("/reports/utilization", response_model=UtilizationReport, tags=["reports"])
+-def utilization_report(store: StoreDep, start: date, end: date) -> UtilizationReport:
+-    return reports.utilization_report(store, start, end)
++def utilization_report(reports: ReportsDep, start: date, end: date) -> UtilizationReport:
++    return reports.utilization_report(start, end)
+diff --git a/app/services/availability.py b/app/services/availability.py
+index 6387154..7c37cfc 100644
+--- a/app/services/availability.py
++++ b/app/services/availability.py
+@@ -8,7 +8,7 @@ from datetime import date
+ 
+ from app.errors import ConflictError, InvalidRequestError
+ from app.models import Availability, Item, ItemStatus, Reservation, ReservationStatus
+-from app.services.catalog import get_item
++from app.services.catalog import CatalogService
+ from app.storage import Store
+ 
+ 
+@@ -25,26 +25,6 @@ def _overlaps(existing: Reservation, start: date, end: date) -> bool:
+     return starts_inside or ends_inside
+ 
+ 
+-def find_conflicts(
+-    store: Store,
+-    item_id: int,
+-    start: date,
+-    end: date,
+-    *,
+-    exclude_id: int | None = None,
+-) -> list[Reservation]:
+-    """Reservations of ``item_id`` that block the range ``[start, end)``."""
+-    conflicts: list[Reservation] = []
+-    for reservation in store.reservations.for_item(item_id):
+-        if reservation.id == exclude_id:
+-            continue
+-        if reservation.status is ReservationStatus.RETURNED:
+-            continue
+-        if _overlaps(reservation, start, end):
+-            conflicts.append(reservation)
+-    return conflicts
+-
+-
+ def _unavailable_reason(item: Item) -> str | None:
+     if item.status is ItemStatus.MAINTENANCE:
+         return "Item is under maintenance"
+@@ -53,32 +33,57 @@ def _unavailable_reason(item: Item) -> str | None:
+     return None
+ 
+ 
+-def check_availability(store: Store, item_id: int, start: date, end: date) -> Availability:
+-    """Describe whether ``item_id`` can be reserved for ``[start, end)`` and why not."""
+-    validate_range(start, end)
+-    item = get_item(store, item_id)
+-
+-    reason = _unavailable_reason(item)
+-    conflicts = find_conflicts(store, item_id, start, end)
+-    if reason is None and conflicts:
+-        reason = "Item is already reserved for part of this period"
+-
+-    return Availability(
+-        item_id=item_id,
+-        start=start,
+-        end=end,
+-        available=reason is None,
+-        reason=reason,
+-        conflicting_reservation_ids=[r.id for r in conflicts],
+-    )
+-
+-
+-def ensure_available(store: Store, item: Item, start: date, end: date) -> None:
+-    """Raise ``ConflictError`` unless ``item`` can be reserved for ``[start, end)``."""
+-    reason = _unavailable_reason(item)
+-    if reason is not None:
+-        raise ConflictError(f"Item {item.id} cannot be reserved: {reason.lower()}")
+-    conflicts = find_conflicts(store, item.id, start, end)
+-    if conflicts:
+-        ids = ", ".join(str(r.id) for r in conflicts)
+-        raise ConflictError(f"Item {item.id} is already reserved (reservations: {ids})")
++class AvailabilityService:
++    """Whether items can be reserved for a date range."""
++
++    def __init__(self, store: Store, catalog: CatalogService) -> None:
++        self.store = store
++        self.catalog = catalog
++
++    def find_conflicts(
++        self,
++        item_id: int,
++        start: date,
++        end: date,
++        *,
++        exclude_id: int | None = None,
++    ) -> list[Reservation]:
++        """Reservations of ``item_id`` that block the range ``[start, end)``."""
++        conflicts: list[Reservation] = []
++        for reservation in self.store.reservations.for_item(item_id):
++            if reservation.id == exclude_id:
++                continue
++            if reservation.status is ReservationStatus.RETURNED:
++                continue
++            if _overlaps(reservation, start, end):
++                conflicts.append(reservation)
++        return conflicts
++
++    def check_availability(self, item_id: int, start: date, end: date) -> Availability:
++        """Describe whether ``item_id`` can be reserved for ``[start, end)`` and why not."""
++        validate_range(start, end)
++        item = self.catalog.get_item(item_id)
++
++        reason = _unavailable_reason(item)
++        conflicts = self.find_conflicts(item_id, start, end)
++        if reason is None and conflicts:
++            reason = "Item is already reserved for part of this period"
++
++        return Availability(
++            item_id=item_id,
++            start=start,
++            end=end,
++            available=reason is None,
++            reason=reason,
++            conflicting_reservation_ids=[r.id for r in conflicts],
++        )
++
++    def ensure_available(self, item: Item, start: date, end: date) -> None:
++        """Raise ``ConflictError`` unless ``item`` can be reserved for ``[start, end)``."""
++        reason = _unavailable_reason(item)
++        if reason is not None:
++            raise ConflictError(f"Item {item.id} cannot be reserved: {reason.lower()}")
++        conflicts = self.find_conflicts(item.id, start, end)
++        if conflicts:
++            ids = ", ".join(str(r.id) for r in conflicts)
++            raise ConflictError(f"Item {item.id} is already reserved (reservations: {ids})")
+diff --git a/app/services/catalog.py b/app/services/catalog.py
+index 7796bdf..9baf30d 100644
+--- a/app/services/catalog.py
++++ b/app/services/catalog.py
+@@ -8,24 +8,6 @@ DEFAULT_PAGE_SIZE = 20
+ MAX_PAGE_SIZE = 100
+ 
+ 
+-def list_categories(store: Store) -> list[Category]:
+-    return store.categories.all()
+-
+-
+-def get_category(store: Store, category_id: str) -> Category:
+-    category = store.categories.get(category_id)
+-    if category is None:
+-        raise NotFoundError(f"Category {category_id!r} not found")
+-    return category
+-
+-
+-def get_item(store: Store, item_id: int) -> Item:
+-    item = store.items.get(item_id)
+-    if item is None:
+-        raise NotFoundError(f"Item {item_id} not found")
+-    return item
+-
+-
+ def _matches(item: Item, q: str | None, category: str | None) -> bool:
+     if category is not None and item.category != category:
+         return False
+@@ -34,47 +16,66 @@ def _matches(item: Item, q: str | None, category: str | None) -> bool:
+     return True
+ 
+ 
+-def list_items(
+-    store: Store,
+-    *,
+-    q: str | None = None,
+-    category: str | None = None,
+-    limit: int = DEFAULT_PAGE_SIZE,
+-    offset: int = 0,
+-) -> ItemPage:
+-    """Search the catalog.
+-
+-    ``q`` filters by item name, ``category`` by category id. Results are ordered by item id;
+-    ``offset`` items are skipped and at most ``limit`` returned. ``total`` is the number of
+-    matching items before pagination.
+-    """
+-    if not 1 <= limit <= MAX_PAGE_SIZE:
+-        raise InvalidRequestError(f"limit must be between 1 and {MAX_PAGE_SIZE}")
+-    if offset < 0:
+-        raise InvalidRequestError("offset must not be negative")
+-
+-    matching = [item for item in store.items.all() if _matches(item, q, category)]
+-    return ItemPage(
+-        items=matching[offset:limit],
+-        total=len(matching),
+-        limit=limit,
+-        offset=offset,
+-    )
+-
+-
+-def create_item(store: Store, data: ItemCreate) -> Item:
+-    """Add a new item to the catalog. The category must already exist."""
+-    if data.category not in store.categories:
+-        raise InvalidRequestError(f"Unknown category {data.category!r}")
+-    return store.items.create(data)
+-
+-
+-def set_item_status(store: Store, item_id: int, status: ItemStatus) -> Item:
+-    """Move an item between available / maintenance / retired.
+-
+-    Retiring is permanent: a retired item cannot be brought back.
+-    """
+-    item = get_item(store, item_id)
+-    if item.status is ItemStatus.RETIRED and status is not ItemStatus.RETIRED:
+-        raise ConflictError(f"Item {item_id} is retired and cannot change status")
+-    return store.items.save(item.model_copy(update={"status": status}))
++class CatalogService:
++    """Categories and items of the shop."""
++
++    def __init__(self, store: Store) -> None:
++        self.store = store
++
++    def list_categories(self) -> list[Category]:
++        return self.store.categories.all()
++
++    def get_category(self, category_id: str) -> Category:
++        category = self.store.categories.get(category_id)
++        if category is None:
++            raise NotFoundError(f"Category {category_id!r} not found")
++        return category
++
++    def get_item(self, item_id: int) -> Item:
++        item = self.store.items.get(item_id)
++        if item is None:
++            raise NotFoundError(f"Item {item_id} not found")
++        return item
++
++    def list_items(
++        self,
++        *,
++        q: str | None = None,
++        category: str | None = None,
++        limit: int = DEFAULT_PAGE_SIZE,
++        offset: int = 0,
++    ) -> ItemPage:
++        """Search the catalog.
++
++        ``q`` filters by item name, ``category`` by category id. Results are ordered by item
++        id; ``offset`` items are skipped and at most ``limit`` returned. ``total`` is the
++        number of matching items before pagination.
++        """
++        if not 1 <= limit <= MAX_PAGE_SIZE:
++            raise InvalidRequestError(f"limit must be between 1 and {MAX_PAGE_SIZE}")
++        if offset < 0:
++            raise InvalidRequestError("offset must not be negative")
++
++        matching = [item for item in self.store.items.all() if _matches(item, q, category)]
++        return ItemPage(
++            items=matching[offset:limit],
++            total=len(matching),
++            limit=limit,
++            offset=offset,
++        )
++
++    def create_item(self, data: ItemCreate) -> Item:
++        """Add a new item to the catalog. The category must already exist."""
++        if data.category not in self.store.categories:
++            raise InvalidRequestError(f"Unknown category {data.category!r}")
++        return self.store.items.create(data)
++
++    def set_item_status(self, item_id: int, status: ItemStatus) -> Item:
++        """Move an item between available / maintenance / retired.
++
++        Retiring is permanent: a retired item cannot be brought back.
++        """
++        item = self.get_item(item_id)
++        if item.status is ItemStatus.RETIRED and status is not ItemStatus.RETIRED:
++            raise ConflictError(f"Item {item_id} is retired and cannot change status")
++        return self.store.items.save(item.model_copy(update={"status": status}))
+diff --git a/app/services/customers.py b/app/services/customers.py
+index 9f68044..6a75bbe 100644
+--- a/app/services/customers.py
++++ b/app/services/customers.py
+@@ -5,22 +5,26 @@ from app.models import Customer, CustomerCreate, CustomerTier
+ from app.storage import Store
+ 
+ 
+-def list_customers(store: Store, *, tier: CustomerTier | None = None) -> list[Customer]:
+-    customers = store.customers.all()
+-    if tier is not None:
+-        customers = [c for c in customers if c.tier is tier]
+-    return customers
++class CustomerService:
++    """Customer accounts."""
+ 
++    def __init__(self, store: Store) -> None:
++        self.store = store
+ 
+-def get_customer(store: Store, customer_id: int) -> Customer:
+-    customer = store.customers.get(customer_id)
+-    if customer is None:
+-        raise NotFoundError(f"Customer {customer_id} not found")
+-    return customer
++    def list_customers(self, *, tier: CustomerTier | None = None) -> list[Customer]:
++        customers = self.store.customers.all()
++        if tier is not None:
++            customers = [c for c in customers if c.tier is tier]
++        return customers
+ 
++    def get_customer(self, customer_id: int) -> Customer:
++        customer = self.store.customers.get(customer_id)
++        if customer is None:
++            raise NotFoundError(f"Customer {customer_id} not found")
++        return customer
+ 
+-def create_customer(store: Store, data: CustomerCreate) -> Customer:
+-    """Register a customer. E-mail addresses are unique (case-insensitive)."""
+-    if store.customers.by_email(data.email) is not None:
+-        raise ConflictError(f"A customer with e-mail {data.email!r} already exists")
+-    return store.customers.create(data)
++    def create_customer(self, data: CustomerCreate) -> Customer:
++        """Register a customer. E-mail addresses are unique (case-insensitive)."""
++        if self.store.customers.by_email(data.email) is not None:
++            raise ConflictError(f"A customer with e-mail {data.email!r} already exists")
++        return self.store.customers.create(data)
+diff --git a/app/services/invoices.py b/app/services/invoices.py
+index 54ce50d..bd2833a 100644
+--- a/app/services/invoices.py
++++ b/app/services/invoices.py
+@@ -8,10 +8,10 @@ from decimal import Decimal
+ 
+ from app.errors import ConflictError
+ from app.models import Invoice, InvoiceLine, InvoiceLineKind, Reservation, ReservationStatus
+-from app.services.catalog import get_item
+-from app.services.customers import get_customer
+-from app.services.pricing import TAX_RATE, ZERO, lookup_coupon, money, quote_rental
+-from app.services.reservations import get_reservation
++from app.services.catalog import CatalogService
++from app.services.customers import CustomerService
++from app.services.pricing import TAX_RATE, ZERO, PricingService, money, quote_rental
++from app.services.reservations import ReservationService
+ from app.services.returns import late_days, late_fee, late_rate
+ from app.storage import Store
+ 
+@@ -31,48 +31,68 @@ def _late_fee_line(reservation: Reservation, daily_rate: Decimal) -> InvoiceLine
+     )
+ 
+ 
+-def compute_invoice(store: Store, reservation: Reservation) -> Invoice:
+-    """Build the invoice for ``reservation`` regardless of its status."""
+-    item = get_item(store, reservation.item_id)
+-    customer = get_customer(store, reservation.customer_id)
+-    coupon = lookup_coupon(store, reservation.coupon_code) if reservation.coupon_code else None
+-    quote = quote_rental(item, customer, reservation.start, reservation.end, coupon)
++class InvoiceService:
++    """Invoices of reservations."""
+ 
+-    free_note = f", {quote.free_days} free" if quote.free_days else ""
+-    lines = [
+-        InvoiceLine(
+-            kind=InvoiceLineKind.RENTAL,
+-            description=f"{item.name} rental ({quote.days} days{free_note})",
+-            quantity=quote.billable_days,
+-            unit_price=item.daily_rate,
+-            amount=quote.rental_amount,
++    def __init__(
++        self,
++        store: Store,
++        catalog: CatalogService,
++        customers: CustomerService,
++        pricing: PricingService,
++        reservations: ReservationService,
++    ) -> None:
++        self.store = store
++        self.catalog = catalog
++        self.customers = customers
++        self.pricing = pricing
++        self.reservations = reservations
++
++    def compute_invoice(self, reservation: Reservation) -> Invoice:
++        """Build the invoice for ``reservation`` regardless of its status."""
++        item = self.catalog.get_item(reservation.item_id)
++        customer = self.customers.get_customer(reservation.customer_id)
++        coupon = (
++            self.pricing.lookup_coupon(reservation.coupon_code)
++            if reservation.coupon_code
++            else None
+         )
+-    ]
+-    late_line = _late_fee_line(reservation, item.daily_rate)
+-    if late_line is not None:
+-        lines.append(late_line)
++        quote = quote_rental(item, customer, reservation.start, reservation.end, coupon)
+ 
+-    subtotal = sum((line.amount for line in lines), ZERO)
++        free_note = f", {quote.free_days} free" if quote.free_days else ""
++        lines = [
++            InvoiceLine(
++                kind=InvoiceLineKind.RENTAL,
++                description=f"{item.name} rental ({quote.days} days{free_note})",
++                quantity=quote.billable_days,
++                unit_price=item.daily_rate,
++                amount=quote.rental_amount,
++            )
++        ]
++        late_line = _late_fee_line(reservation, item.daily_rate)
++        if late_line is not None:
++            lines.append(late_line)
+ 
+-    tier_discount = money(quote.rental_amount * quote.discounts.tier_rate)
+-    taxable = subtotal - tier_discount
+-    tax = money(taxable * TAX_RATE)
+-    coupon_discount = money((taxable + tax) * quote.discounts.coupon_rate)
++        subtotal = sum((line.amount for line in lines), ZERO)
+ 
+-    return Invoice(
+-        reservation_id=reservation.id,
+-        customer_id=customer.id,
+-        lines=lines,
+-        subtotal=money(subtotal),
+-        discount=tier_discount + coupon_discount,
+-        tax=tax,
+-        total=money(taxable + tax - coupon_discount),
+-    )
++        tier_discount = money(quote.rental_amount * quote.discounts.tier_rate)
++        taxable = subtotal - tier_discount
++        tax = money(taxable * TAX_RATE)
++        coupon_discount = money((taxable + tax) * quote.discounts.coupon_rate)
+ 
++        return Invoice(
++            reservation_id=reservation.id,
++            customer_id=customer.id,
++            lines=lines,
++            subtotal=money(subtotal),
++            discount=tier_discount + coupon_discount,
++            tax=tax,
++            total=money(taxable + tax - coupon_discount),
++        )
+ 
+-def get_invoice(store: Store, reservation_id: int) -> Invoice:
+-    """Invoice of an active or returned reservation; cancelled ones are not billed."""
+-    reservation = get_reservation(store, reservation_id)
+-    if reservation.status is ReservationStatus.CANCELLED:
+-        raise ConflictError(f"Reservation {reservation_id} is cancelled and has no invoice")
+-    return compute_invoice(store, reservation)
++    def get_invoice(self, reservation_id: int) -> Invoice:
++        """Invoice of an active or returned reservation; cancelled ones are not billed."""
++        reservation = self.reservations.get_reservation(reservation_id)
++        if reservation.status is ReservationStatus.CANCELLED:
++            raise ConflictError(f"Reservation {reservation_id} is cancelled and has no invoice")
++        return self.compute_invoice(reservation)
+diff --git a/app/services/pricing.py b/app/services/pricing.py
+index bf2baf1..d4ae24d 100644
+--- a/app/services/pricing.py
++++ b/app/services/pricing.py
+@@ -97,23 +97,26 @@ def quote_rental(
+ # --- coupons ---------------------------------------------------------------------------
+ 
+ 
+-def list_coupons(store: Store) -> list[Coupon]:
+-    return store.coupons.all()
++class PricingService:
++    """Coupons stored in the shop (the price arithmetic above is pure and needs no store)."""
+ 
++    def __init__(self, store: Store) -> None:
++        self.store = store
+ 
+-def lookup_coupon(store: Store, code: str) -> Coupon | None:
+-    """Find a coupon by code (case-insensitive)."""
+-    return store.coupons.get(code)
++    def list_coupons(self) -> list[Coupon]:
++        return self.store.coupons.all()
+ 
++    def lookup_coupon(self, code: str) -> Coupon | None:
++        """Find a coupon by code (case-insensitive)."""
++        return self.store.coupons.get(code)
+ 
+-def get_coupon(store: Store, code: str) -> Coupon:
+-    coupon = lookup_coupon(store, code)
+-    if coupon is None:
+-        raise NotFoundError(f"Coupon {code!r} not found")
+-    return coupon
++    def get_coupon(self, code: str) -> Coupon:
++        coupon = self.lookup_coupon(code)
++        if coupon is None:
++            raise NotFoundError(f"Coupon {code!r} not found")
++        return coupon
+ 
+-
+-def create_coupon(store: Store, data: CouponCreate) -> Coupon:
+-    if data.code in store.coupons:
+-        raise ConflictError(f"Coupon {data.code!r} already exists")
+-    return store.coupons.create(data)
++    def create_coupon(self, data: CouponCreate) -> Coupon:
++        if data.code in self.store.coupons:
++            raise ConflictError(f"Coupon {data.code!r} already exists")
++        return self.store.coupons.create(data)
+diff --git a/app/services/reports.py b/app/services/reports.py
+index 0833af7..6f63e8b 100644
+--- a/app/services/reports.py
++++ b/app/services/reports.py
+@@ -13,79 +13,86 @@ from app.models import (
+     UtilizationReport,
+ )
+ from app.services.availability import validate_range
+-from app.services.invoices import compute_invoice
++from app.services.invoices import InvoiceService
+ from app.services.pricing import ZERO, money
+ from app.storage import Store
+ 
+ PERCENT_STEP = Decimal("0.1")
+ 
+ 
+-def revenue_report(store: Store, start: date, end: date) -> RevenueReport:
+-    """Net revenue (invoice total minus tax) per category.
++class ReportService:
++    """Management reports."""
+ 
+-    A reservation counts towards the period ``[start, end)`` when its start date falls in
+-    it. Cancelled reservations bring no revenue.
+-    """
+-    validate_range(start, end)
+-    revenue: dict[str, Decimal] = defaultdict(lambda: ZERO)
+-    counts: dict[str, int] = defaultdict(int)
++    def __init__(self, store: Store, invoices: InvoiceService) -> None:
++        self.store = store
++        self.invoices = invoices
+ 
+-    for reservation in store.reservations.all():
+-        if not start <= reservation.start < end:
+-            continue
+-        item = store.items.get(reservation.item_id)
+-        if item is None:
+-            continue
+-        invoice = compute_invoice(store, reservation)
+-        revenue[item.category] += invoice.total - invoice.tax
+-        counts[item.category] += 1
++    def revenue_report(self, start: date, end: date) -> RevenueReport:
++        """Net revenue (invoice total minus tax) per category.
+ 
+-    rows = [
+-        CategoryRevenue(
+-            category=category,
+-            reservations=counts[category],
+-            revenue=money(revenue[category]),
+-        )
+-        for category in sorted(revenue)
+-    ]
+-    return RevenueReport(
+-        start=start,
+-        end=end,
+-        rows=rows,
+-        total=money(sum((row.revenue for row in rows), ZERO)),
+-    )
++        A reservation counts towards the period ``[start, end)`` when its start date falls
++        in it. Cancelled reservations bring no revenue.
++        """
++        validate_range(start, end)
++        revenue: dict[str, Decimal] = defaultdict(lambda: ZERO)
++        counts: dict[str, int] = defaultdict(int)
+ 
++        for reservation in self.store.reservations.all():
++            if not start <= reservation.start < end:
++                continue
++            item = self.store.items.get(reservation.item_id)
++            if item is None:
++                continue
++            invoice = self.invoices.compute_invoice(reservation)
++            revenue[item.category] += invoice.total - invoice.tax
++            counts[item.category] += 1
+ 
+-def _reserved_days(store: Store, item_id: int, start: date, end: date) -> int:
+-    days = 0
+-    for reservation in store.reservations.for_item(item_id):
+-        if reservation.status is ReservationStatus.CANCELLED:
+-            continue
+-        overlap = (min(reservation.end, end) - max(reservation.start, start)).days
+-        days += max(0, overlap)
+-    return days
++        rows = [
++            CategoryRevenue(
++                category=category,
++                reservations=counts[category],
++                revenue=money(revenue[category]),
++            )
++            for category in sorted(revenue)
++        ]
++        return RevenueReport(
++            start=start,
++            end=end,
++            rows=rows,
++            total=money(sum((row.revenue for row in rows), ZERO)),
++        )
+ 
++    def _reserved_days(self, item_id: int, start: date, end: date) -> int:
++        days = 0
++        for reservation in self.store.reservations.for_item(item_id):
++            if reservation.status is ReservationStatus.CANCELLED:
++                continue
++            overlap = (min(reservation.end, end) - max(reservation.start, start)).days
++            days += max(0, overlap)
++        return days
+ 
+-def utilization_report(store: Store, start: date, end: date) -> UtilizationReport:
+-    """Share of days in ``[start, end)`` each non-retired item was reserved, in percent.
++    def utilization_report(self, start: date, end: date) -> UtilizationReport:
++        """Share of days in ``[start, end)`` each non-retired item was reserved, in percent.
+ 
+-    Active and returned reservations count; cancelled ones do not.
+-    """
+-    validate_range(start, end)
+-    period_days = (end - start).days
+-    rows: list[ItemUtilization] = []
+-    for item in store.items.all():
+-        if item.status is ItemStatus.RETIRED:
+-            continue
+-        reserved = _reserved_days(store, item.id, start, end)
+-        pct = (Decimal(reserved) * 100 / period_days).quantize(PERCENT_STEP, rounding=ROUND_HALF_UP)
+-        rows.append(
+-            ItemUtilization(
+-                item_id=item.id,
+-                item_name=item.name,
+-                reserved_days=reserved,
+-                period_days=period_days,
+-                utilization_pct=pct,
++        Active and returned reservations count; cancelled ones do not.
++        """
++        validate_range(start, end)
++        period_days = (end - start).days
++        rows: list[ItemUtilization] = []
++        for item in self.store.items.all():
++            if item.status is ItemStatus.RETIRED:
++                continue
++            reserved = self._reserved_days(item.id, start, end)
++            pct = (Decimal(reserved) * 100 / period_days).quantize(
++                PERCENT_STEP, rounding=ROUND_HALF_UP
+             )
+-        )
+-    return UtilizationReport(start=start, end=end, rows=rows)
++            rows.append(
++                ItemUtilization(
++                    item_id=item.id,
++                    item_name=item.name,
++                    reserved_days=reserved,
++                    period_days=period_days,
++                    utilization_pct=pct,
++                )
++            )
++        return UtilizationReport(start=start, end=end, rows=rows)
+diff --git a/app/services/reservations.py b/app/services/reservations.py
+index 88982f8..757b23c 100644
+--- a/app/services/reservations.py
++++ b/app/services/reservations.py
+@@ -3,85 +3,102 @@
+ from app.clock import Clock
+ from app.errors import ConflictError, InvalidRequestError, NotFoundError
+ from app.models import Reservation, ReservationCreate, ReservationStatus
+-from app.services.availability import ensure_available, validate_range
+-from app.services.catalog import get_item
+-from app.services.customers import get_customer
+-from app.services.pricing import lookup_coupon
++from app.services.availability import AvailabilityService, validate_range
++from app.services.catalog import CatalogService
++from app.services.customers import CustomerService
++from app.services.pricing import PricingService
+ from app.storage import Store
+ 
+ MAX_RENTAL_DAYS = 90
+ 
+ 
+-def get_reservation(store: Store, reservation_id: int) -> Reservation:
+-    reservation = store.reservations.get(reservation_id)
+-    if reservation is None:
+-        raise NotFoundError(f"Reservation {reservation_id} not found")
+-    return reservation
++class ReservationService:
++    """Booking, looking up and cancelling reservations."""
+ 
++    def __init__(
++        self,
++        store: Store,
++        clock: Clock,
++        catalog: CatalogService,
++        customers: CustomerService,
++        pricing: PricingService,
++        availability: AvailabilityService,
++    ) -> None:
++        self.store = store
++        self.clock = clock
++        self.catalog = catalog
++        self.customers = customers
++        self.pricing = pricing
++        self.availability = availability
+ 
+-def list_reservations(
+-    store: Store,
+-    *,
+-    customer_id: int | None = None,
+-    item_id: int | None = None,
+-    status: ReservationStatus | None = None,
+-) -> list[Reservation]:
+-    """Reservations ordered by id, optionally filtered."""
+-    result = store.reservations.all()
+-    if customer_id is not None:
+-        result = [r for r in result if r.customer_id == customer_id]
+-    if item_id is not None:
+-        result = [r for r in result if r.item_id == item_id]
+-    if status is not None:
+-        result = [r for r in result if r.status is status]
+-    return result
++    def get_reservation(self, reservation_id: int) -> Reservation:
++        reservation = self.store.reservations.get(reservation_id)
++        if reservation is None:
++            raise NotFoundError(f"Reservation {reservation_id} not found")
++        return reservation
+ 
++    def list_reservations(
++        self,
++        *,
++        customer_id: int | None = None,
++        item_id: int | None = None,
++        status: ReservationStatus | None = None,
++    ) -> list[Reservation]:
++        """Reservations ordered by id, optionally filtered."""
++        result = self.store.reservations.all()
++        if customer_id is not None:
++            result = [r for r in result if r.customer_id == customer_id]
++        if item_id is not None:
++            result = [r for r in result if r.item_id == item_id]
++        if status is not None:
++            result = [r for r in result if r.status is status]
++        return result
+ 
+-def create_reservation(store: Store, clock: Clock, data: ReservationCreate) -> Reservation:
+-    """Book an item for a customer.
++    def create_reservation(self, data: ReservationCreate) -> Reservation:
++        """Book an item for a customer.
+ 
+-    Rules: the range must be non-empty, start today or later and be at most
+-    ``MAX_RENTAL_DAYS`` long; item and customer must exist; a coupon code, if given, must
+-    exist; the item must be available (not in maintenance / retired, no overlapping active
+-    reservation).
+-    """
+-    validate_range(data.start, data.end)
+-    today = clock.today()
+-    if data.start < today:
+-        raise InvalidRequestError("Reservations cannot start in the past")
+-    if (data.end - data.start).days > MAX_RENTAL_DAYS:
+-        raise InvalidRequestError(f"Reservations are limited to {MAX_RENTAL_DAYS} days")
++        Rules: the range must be non-empty, start today or later and be at most
++        ``MAX_RENTAL_DAYS`` long; item and customer must exist; a coupon code, if given,
++        must exist; the item must be available (not in maintenance / retired, no
++        overlapping active reservation).
++        """
++        validate_range(data.start, data.end)
++        today = self.clock.today()
++        if data.start < today:
++            raise InvalidRequestError("Reservations cannot start in the past")
++        if (data.end - data.start).days > MAX_RENTAL_DAYS:
++            raise InvalidRequestError(f"Reservations are limited to {MAX_RENTAL_DAYS} days")
+ 
+-    item = get_item(store, data.item_id)
+-    customer = get_customer(store, data.customer_id)
++        item = self.catalog.get_item(data.item_id)
++        customer = self.customers.get_customer(data.customer_id)
+ 
+-    coupon_code: str | None = None
+-    if data.coupon_code:
+-        coupon = lookup_coupon(store, data.coupon_code)
+-        if coupon is None:
+-            raise InvalidRequestError(f"Unknown coupon code {data.coupon_code!r}")
+-        coupon_code = coupon.code
++        coupon_code: str | None = None
++        if data.coupon_code:
++            coupon = self.pricing.lookup_coupon(data.coupon_code)
++            if coupon is None:
++                raise InvalidRequestError(f"Unknown coupon code {data.coupon_code!r}")
++            coupon_code = coupon.code
+ 
+-    ensure_available(store, item, data.start, data.end)
++        self.availability.ensure_available(item, data.start, data.end)
+ 
+-    reservation = Reservation(
+-        id=store.reservations.allocate_id(),
+-        item_id=item.id,
+-        customer_id=customer.id,
+-        start=data.start,
+-        end=data.end,
+-        coupon_code=coupon_code,
+-        created_on=today,
+-    )
+-    return store.reservations.insert(reservation)
+-
+-
+-def cancel_reservation(store: Store, reservation_id: int) -> Reservation:
+-    """Cancel an active reservation. Returned or already cancelled ones cannot be cancelled."""
+-    reservation = get_reservation(store, reservation_id)
+-    if reservation.status is not ReservationStatus.ACTIVE:
+-        raise ConflictError(
+-            f"Reservation {reservation_id} is {reservation.status.value} and cannot be cancelled"
++        reservation = Reservation(
++            id=self.store.reservations.allocate_id(),
++            item_id=item.id,
++            customer_id=customer.id,
++            start=data.start,
++            end=data.end,
++            coupon_code=coupon_code,
++            created_on=today,
+         )
+-    cancelled = reservation.model_copy(update={"status": ReservationStatus.CANCELLED})
+-    return store.reservations.save(cancelled)
++        return self.store.reservations.insert(reservation)
++
++    def cancel_reservation(self, reservation_id: int) -> Reservation:
++        """Cancel an active reservation. Returned or cancelled ones cannot be cancelled."""
++        reservation = self.get_reservation(reservation_id)
++        if reservation.status is not ReservationStatus.ACTIVE:
++            raise ConflictError(
++                f"Reservation {reservation_id} is {reservation.status.value} and cannot be "
++                "cancelled"
++            )
++        cancelled = reservation.model_copy(update={"status": ReservationStatus.CANCELLED})
++        return self.store.reservations.save(cancelled)
+diff --git a/app/services/returns.py b/app/services/returns.py
+index d4cdcba..b7e8020 100644
+--- a/app/services/returns.py
++++ b/app/services/returns.py
+@@ -6,9 +6,9 @@ from decimal import Decimal
+ from app.clock import Clock
+ from app.errors import ConflictError, InvalidRequestError
+ from app.models import ItemStatus, ReservationStatus, ReturnReceipt, ReturnRequest
+-from app.services.catalog import get_item
++from app.services.catalog import CatalogService
+ from app.services.pricing import ZERO, money
+-from app.services.reservations import get_reservation
++from app.services.reservations import ReservationService
+ from app.storage import Store
+ 
+ LATE_FEE_MULTIPLIER = Decimal("1.5")
+@@ -32,52 +32,66 @@ def late_fee(daily_rate: Decimal, days_late: int) -> Decimal:
+     return money(late_rate(daily_rate) * days_late)
+ 
+ 
+-def return_reservation(
+-    store: Store, clock: Clock, reservation_id: int, request: ReturnRequest
+-) -> ReturnReceipt:
+-    """Register the return of a reserved item.
+-
+-    The return date defaults to today and may be neither before the reservation start nor in
+-    the future. A damaged item keeps the deposit and goes to maintenance; otherwise the
+-    deposit is refunded in full.
+-    """
+-    reservation = get_reservation(store, reservation_id)
+-    if reservation.status is not ReservationStatus.ACTIVE:
+-        raise ConflictError(
+-            f"Reservation {reservation_id} is {reservation.status.value} and cannot be returned"
++class ReturnService:
++    """Registering returns: late fees, deposits and damaged items."""
++
++    def __init__(
++        self,
++        store: Store,
++        clock: Clock,
++        catalog: CatalogService,
++        reservations: ReservationService,
++    ) -> None:
++        self.store = store
++        self.clock = clock
++        self.catalog = catalog
++        self.reservations = reservations
++
++    def return_reservation(self, reservation_id: int, request: ReturnRequest) -> ReturnReceipt:
++        """Register the return of a reserved item.
++
++        The return date defaults to today and may be neither before the reservation start
++        nor in the future. A damaged item keeps the deposit and goes to maintenance;
++        otherwise the deposit is refunded in full.
++        """
++        reservation = self.reservations.get_reservation(reservation_id)
++        if reservation.status is not ReservationStatus.ACTIVE:
++            raise ConflictError(
++                f"Reservation {reservation_id} is {reservation.status.value} and cannot be "
++                "returned"
++            )
++
++        today = self.clock.today()
++        returned_on = request.returned_on or today
++        if returned_on < reservation.start:
++            raise InvalidRequestError("Return date is before the reservation start")
++        if returned_on > today:
++            raise InvalidRequestError("Return date cannot be in the future")
++
++        item = self.catalog.get_item(reservation.item_id)
++        days_late = late_days(reservation.end, returned_on)
++        fee = late_fee(item.daily_rate, days_late)
++
++        self.store.reservations.save(
++            reservation.model_copy(
++                update={
++                    "status": ReservationStatus.RETURNED,
++                    "returned_on": returned_on,
++                    "damaged": request.damaged,
++                }
++            )
+         )
+-
+-    today = clock.today()
+-    returned_on = request.returned_on or today
+-    if returned_on < reservation.start:
+-        raise InvalidRequestError("Return date is before the reservation start")
+-    if returned_on > today:
+-        raise InvalidRequestError("Return date cannot be in the future")
+-
+-    item = get_item(store, reservation.item_id)
+-    days_late = late_days(reservation.end, returned_on)
+-    fee = late_fee(item.daily_rate, days_late)
+-
+-    store.reservations.save(
+-        reservation.model_copy(
+-            update={
+-                "status": ReservationStatus.RETURNED,
+-                "returned_on": returned_on,
+-                "damaged": request.damaged,
+-            }
++        if request.damaged and item.status is ItemStatus.AVAILABLE:
++            self.store.items.save(item.model_copy(update={"status": ItemStatus.MAINTENANCE}))
++
++        withheld = item.deposit if request.damaged else ZERO
++        return ReturnReceipt(
++            reservation_id=reservation.id,
++            returned_on=returned_on,
++            late_days=days_late,
++            late_fee=fee,
++            damaged=request.damaged,
++            deposit=item.deposit,
++            deposit_refunded=money(item.deposit - withheld),
++            deposit_withheld=money(withheld),
+         )
+-    )
+-    if request.damaged and item.status is ItemStatus.AVAILABLE:
+-        store.items.save(item.model_copy(update={"status": ItemStatus.MAINTENANCE}))
+-
+-    withheld = item.deposit if request.damaged else ZERO
+-    return ReturnReceipt(
+-        reservation_id=reservation.id,
+-        returned_on=returned_on,
+-        late_days=days_late,
+-        late_fee=fee,
+-        damaged=request.damaged,
+-        deposit=item.deposit,
+-        deposit_refunded=money(item.deposit - withheld),
+-        deposit_withheld=money(withheld),
+-    )

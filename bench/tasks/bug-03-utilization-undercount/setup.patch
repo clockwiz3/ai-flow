@@ -1,0 +1,116 @@
+diff --git a/README.md b/README.md
+index 1b28a59..61961de 100644
+--- a/README.md
++++ b/README.md
+@@ -131,8 +131,14 @@ tax 29.75, total 178.50.
+   reservations whose `start` falls in `[start, end)`. **Cancelled reservations are
+   excluded**; active and returned ones count.
+ - `GET /reports/utilization?start&end`: for every non-retired item, the number of days in
+-  `[start, end)` covered by active or returned reservations and that as a percentage of the
+-  period (one decimal, half up). Cancelled reservations do not count.
++  `[start, end)` on which the item was out of the shop, and that as a percentage of the
++  period (one decimal, half up).
++  - A reservation keeps its item out from its `start` until the item is back in the shop:
++    an active reservation until its `end`, a returned reservation until its `returned_on`
++    (both exclusive). An early return frees the rest of the booked range; on a late return
++    the late days count as well.
++  - Only days inside the report period count, whenever the reservation started or ended.
++  - Cancelled reservations do not count.
+ 
+ ## API
+ 
+diff --git a/app/models.py b/app/models.py
+index 9c82ce8..7714491 100644
+--- a/app/models.py
++++ b/app/models.py
+@@ -150,6 +150,13 @@ class Reservation(DomainModel):
+         """Number of rental days (``end`` is exclusive)."""
+         return (self.end - self.start).days
+ 
++    @property
++    def back_on(self) -> date:
++        """Morning the reserved item is back in the shop."""
++        if self.returned_on is not None and self.returned_on < self.end:
++            return self.returned_on
++        return self.end
++
+ 
+ class ReturnRequest(DomainModel):
+     returned_on: date | None = Field(default=None, description="Defaults to today when omitted.")
+diff --git a/app/services/reports.py b/app/services/reports.py
+index 0833af7..a61eb36 100644
+--- a/app/services/reports.py
++++ b/app/services/reports.py
+@@ -8,6 +8,7 @@ from app.models import (
+     CategoryRevenue,
+     ItemStatus,
+     ItemUtilization,
++    Reservation,
+     ReservationStatus,
+     RevenueReport,
+     UtilizationReport,
+@@ -20,6 +21,11 @@ from app.storage import Store
+ PERCENT_STEP = Decimal("0.1")
+ 
+ 
++def _starting_in(store: Store, start: date, end: date) -> list[Reservation]:
++    """Reservations whose start date falls in ``[start, end)``."""
++    return [r for r in store.reservations.all() if start <= r.start < end]
++
++
+ def revenue_report(store: Store, start: date, end: date) -> RevenueReport:
+     """Net revenue (invoice total minus tax) per category.
+ 
+@@ -30,9 +36,7 @@ def revenue_report(store: Store, start: date, end: date) -> RevenueReport:
+     revenue: dict[str, Decimal] = defaultdict(lambda: ZERO)
+     counts: dict[str, int] = defaultdict(int)
+ 
+-    for reservation in store.reservations.all():
+-        if not start <= reservation.start < end:
+-            continue
++    for reservation in _starting_in(store, start, end):
+         item = store.items.get(reservation.item_id)
+         if item is None:
+             continue
+@@ -56,28 +60,31 @@ def revenue_report(store: Store, start: date, end: date) -> RevenueReport:
+     )
+ 
+ 
+-def _reserved_days(store: Store, item_id: int, start: date, end: date) -> int:
+-    days = 0
+-    for reservation in store.reservations.for_item(item_id):
+-        if reservation.status is ReservationStatus.CANCELLED:
+-            continue
+-        overlap = (min(reservation.end, end) - max(reservation.start, start)).days
+-        days += max(0, overlap)
+-    return days
++def _days_out(reservation: Reservation, start: date, end: date) -> int:
++    """Days of ``[start, end)`` on which ``reservation`` kept its item out of the shop."""
++    first = max(reservation.start, start)
++    last = min(reservation.back_on, end)
++    return max(0, (last - first).days)
+ 
+ 
+ def utilization_report(store: Store, start: date, end: date) -> UtilizationReport:
+-    """Share of days in ``[start, end)`` each non-retired item was reserved, in percent.
++    """Share of days in ``[start, end)`` each non-retired item was out of the shop, in percent.
+ 
+     Active and returned reservations count; cancelled ones do not.
+     """
+     validate_range(start, end)
+     period_days = (end - start).days
++    days_out: dict[int, int] = defaultdict(int)
++    for reservation in _starting_in(store, start, end):
++        if reservation.status is ReservationStatus.CANCELLED:
++            continue
++        days_out[reservation.item_id] += _days_out(reservation, start, end)
++
+     rows: list[ItemUtilization] = []
+     for item in store.items.all():
+         if item.status is ItemStatus.RETIRED:
+             continue
+-        reserved = _reserved_days(store, item.id, start, end)
++        reserved = days_out[item.id]
+         pct = (Decimal(reserved) * 100 / period_days).quantize(PERCENT_STEP, rounding=ROUND_HALF_UP)
+         rows.append(
+             ItemUtilization(

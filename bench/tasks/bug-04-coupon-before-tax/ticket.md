@@ -1,21 +1,13 @@
-# Invoices with a coupon show the wrong discount and tax
+# Coupon invoices don't reconcile with the pricing policy
 
-**Reported by:** accounting (Marek)
-**Severity:** high - invoices with coupons don't match our pricing rules; the tax we report is wrong
+**Reported by:** finance (Marek)
+**Severity:** high - the VAT we declare is computed from these invoices
 
-## What happens
+## What we noticed
 
-When a reservation has a coupon, the invoice takes the coupon off the amount **after** tax
-has been added, and it also ends up discounting the late fee. Our pricing rules (README,
-"Pricing" and "Invoices") say:
-
-- tier discount and coupon **add up** into one combined rate (capped at 30%),
-- the combined discount applies **only to the rental amount**,
-- discounts are applied **before tax**, and tax is 20% of `subtotal - discount`.
-
-Invoices without a coupon look correct.
-
-## Example
+During the monthly reconciliation, invoices for reservations booked with a coupon don't
+match the pricing policy (README, "Pricing" and "Invoices"). Invoices without a coupon
+reconcile fine. We checked a handful by hand; here is one we can reproduce on the demo data.
 
 Silver customer Bob (customer 2) books the Family Tent (item 6, 35.00/day) for 5 days with
 coupon `SPRING10`:
@@ -27,19 +19,25 @@ POST /reservations
 GET /reservations/{id}/invoice
 ```
 
-| field    | actual  | expected |
-| -------- | ------- | -------- |
-| subtotal | 175.00  | 175.00   |
-| discount | 28.70   | 26.25    |
-| tax      | 33.25   | 29.75    |
-| total    | 179.55  | 178.50   |
+The invoice we get:
 
-(5% silver + 10% coupon = 15% of 175.00 = 26.25; tax = 20% of 148.75 = 29.75.)
+| field    | amount  |
+| -------- | ------- |
+| subtotal | 175.00  |
+| discount | 28.70   |
+| tax      | 33.25   |
+| total    | 179.55  |
 
-## Acceptance criteria
+None of discount, tax or total is what the policy gives for this booking, and the figures
+are not even consistent with each other: 20% of `175.00 - 28.70` is not `33.25`.
 
-- Invoice `discount`, `tax` and `total` follow the README for every combination of tier and
-  coupon.
-- The coupon never reduces the late-fee line; only the rental amount is discounted.
-- Invoices without a coupon are unchanged.
-- The revenue report (which is based on invoices) reflects the corrected figures.
+We have not yet checked invoices that combine a coupon with a late return, but we'd like
+those to be right too.
+
+## Expected
+
+- Invoice figures (`discount`, `tax`, `total`) for any reservation follow the README pricing
+  and invoice rules, for every combination of customer tier and coupon, with or without a
+  late return.
+- Invoices that were already correct stay unchanged.
+- Reports built from invoice figures reflect the corrected amounts.

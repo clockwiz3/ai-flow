@@ -1,0 +1,103 @@
+diff --git a/app/services/availability.py b/app/services/availability.py
+index 6387154..169cfda 100644
+--- a/app/services/availability.py
++++ b/app/services/availability.py
+@@ -20,9 +20,7 @@ def validate_range(start: date, end: date) -> None:
+ 
+ def _overlaps(existing: Reservation, start: date, end: date) -> bool:
+     """Whether ``[start, end)`` collides with the existing reservation's range."""
+-    starts_inside = existing.start <= start < existing.end
+-    ends_inside = existing.start < end <= existing.end
+-    return starts_inside or ends_inside
++    return existing.start < end and start < existing.end
+ 
+ 
+ def find_conflicts(
+@@ -38,7 +36,7 @@ def find_conflicts(
+     for reservation in store.reservations.for_item(item_id):
+         if reservation.id == exclude_id:
+             continue
+-        if reservation.status is ReservationStatus.RETURNED:
++        if reservation.status is not ReservationStatus.ACTIVE:
+             continue
+         if _overlaps(reservation, start, end):
+             conflicts.append(reservation)
+diff --git a/app/services/invoices.py b/app/services/invoices.py
+index 54ce50d..d5c4921 100644
+--- a/app/services/invoices.py
++++ b/app/services/invoices.py
+@@ -54,19 +54,18 @@ def compute_invoice(store: Store, reservation: Reservation) -> Invoice:
+ 
+     subtotal = sum((line.amount for line in lines), ZERO)
+ 
+-    tier_discount = money(quote.rental_amount * quote.discounts.tier_rate)
+-    taxable = subtotal - tier_discount
++    discount = money(quote.rental_amount * quote.discounts.total_rate)
++    taxable = subtotal - discount
+     tax = money(taxable * TAX_RATE)
+-    coupon_discount = money((taxable + tax) * quote.discounts.coupon_rate)
+ 
+     return Invoice(
+         reservation_id=reservation.id,
+         customer_id=customer.id,
+         lines=lines,
+         subtotal=money(subtotal),
+-        discount=tier_discount + coupon_discount,
++        discount=discount,
+         tax=tax,
+-        total=money(taxable + tax - coupon_discount),
++        total=money(taxable + tax),
+     )
+ 
+ 
+diff --git a/app/services/pricing.py b/app/services/pricing.py
+index bf2baf1..2ad2dbd 100644
+--- a/app/services/pricing.py
++++ b/app/services/pricing.py
+@@ -59,7 +59,7 @@ def resolve_discounts(tier: CustomerTier, coupon: Coupon | None = None) -> Disco
+     """
+     tier_rate = TIER_DISCOUNTS[tier]
+     coupon_rate = Decimal(coupon.percent) / 100 if coupon is not None else ZERO
+-    coupon_rate = min(coupon_rate, MAX_TOTAL_DISCOUNT)
++    coupon_rate = max(ZERO, min(coupon_rate, MAX_TOTAL_DISCOUNT - tier_rate))
+     return DiscountBreakdown(tier_rate=tier_rate, coupon_rate=coupon_rate)
+ 
+ 
+diff --git a/app/services/reports.py b/app/services/reports.py
+index 0833af7..b27ccdd 100644
+--- a/app/services/reports.py
++++ b/app/services/reports.py
+@@ -33,6 +33,8 @@ def revenue_report(store: Store, start: date, end: date) -> RevenueReport:
+     for reservation in store.reservations.all():
+         if not start <= reservation.start < end:
+             continue
++        if reservation.status is ReservationStatus.CANCELLED:
++            continue
+         item = store.items.get(reservation.item_id)
+         if item is None:
+             continue
+diff --git a/app/services/returns.py b/app/services/returns.py
+index d4cdcba..1265902 100644
+--- a/app/services/returns.py
++++ b/app/services/returns.py
+@@ -1,6 +1,6 @@
+ """Handling item returns: late fees and deposits."""
+ 
+-from datetime import date, timedelta
++from datetime import date
+ from decimal import Decimal
+ 
+ from app.clock import Clock
+@@ -17,10 +17,9 @@ LATE_FEE_MULTIPLIER = Decimal("1.5")
+ def late_days(end: date, returned_on: date) -> int:
+     """Number of chargeable late days for an item due back on ``end``.
+ 
+-    ``end`` is exclusive, so the last day the customer paid for is ``end - 1``.
++    ``end`` is exclusive: returning on ``end`` (or earlier) is on time.
+     """
+-    last_rental_day = end - timedelta(days=1)
+-    return max(0, (returned_on - last_rental_day).days)
++    return max(0, (returned_on - end).days)
+ 
+ 
+ def late_rate(daily_rate: Decimal) -> Decimal:

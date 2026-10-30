@@ -1,0 +1,28 @@
+diff --git a/app/models.py b/app/models.py
+index 7714491..0bf448b 100644
+--- a/app/models.py
++++ b/app/models.py
+@@ -153,9 +153,7 @@ class Reservation(DomainModel):
+     @property
+     def back_on(self) -> date:
+         """Morning the reserved item is back in the shop."""
+-        if self.returned_on is not None and self.returned_on < self.end:
+-            return self.returned_on
+-        return self.end
++        return self.returned_on if self.returned_on is not None else self.end
+ 
+ 
+ class ReturnRequest(DomainModel):
+diff --git a/app/services/reports.py b/app/services/reports.py
+index a61eb36..5732743 100644
+--- a/app/services/reports.py
++++ b/app/services/reports.py
+@@ -75,7 +75,7 @@ def utilization_report(store: Store, start: date, end: date) -> UtilizationRepor
+     validate_range(start, end)
+     period_days = (end - start).days
+     days_out: dict[int, int] = defaultdict(int)
+-    for reservation in _starting_in(store, start, end):
++    for reservation in store.reservations.all():
+         if reservation.status is ReservationStatus.CANCELLED:
+             continue
+         days_out[reservation.item_id] += _days_out(reservation, start, end)

@@ -1,6 +1,0 @@
-id: feat-03-revenue-csv
-title: CSV export of the revenue report
-kind: feature
-difficulty: easy
-expected: solve
-tags: [reports, api]

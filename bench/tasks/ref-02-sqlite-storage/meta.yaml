@@ -1,0 +1,6 @@
+id: ref-02-sqlite-storage
+title: Back the repositories with SQLite instead of in-memory dicts
+kind: refactor
+difficulty: hard
+expected: solve
+tags: []

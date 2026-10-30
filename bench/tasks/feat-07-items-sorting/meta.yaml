@@ -1,6 +1,0 @@
-id: feat-07-items-sorting
-title: Sort the catalog by name or daily rate
-kind: feature
-difficulty: easy
-expected: solve
-tags: [catalog, api]

@@ -1,6 +1,6 @@
 id: bug-01-overlap-containing
 title: Double booking possible when a new reservation spans an existing one
 kind: bug
-difficulty: medium
+difficulty: hard
 expected: solve
 tags: [availability, dates]

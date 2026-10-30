@@ -1,0 +1,451 @@
+diff --git a/app/api/routes.py b/app/api/routes.py
+index 10638d4..3eeaea2 100644
+--- a/app/api/routes.py
++++ b/app/api/routes.py
+@@ -12,6 +12,9 @@ from fastapi import APIRouter, Depends, Query, Request, status
+ from app.clock import Clock
+ from app.models import (
+     Availability,
++    Booking,
++    BookingCreate,
++    BookingInvoice,
+     Category,
+     Coupon,
+     CouponCreate,
+@@ -33,6 +36,7 @@ from app.models import (
+ )
+ from app.services import (
+     availability,
++    bookings,
+     catalog,
+     customers,
+     invoices,
+@@ -208,6 +212,31 @@ def get_invoice(store: StoreDep, reservation_id: int) -> Invoice:
+     return invoices.get_invoice(store, reservation_id)
+ 
+ 
++# --- bookings --------------------------------------------------------------------------
++
++
++@router.post(
++    "/bookings", response_model=Booking, status_code=status.HTTP_201_CREATED, tags=["bookings"]
++)
++def create_booking(store: StoreDep, clock: ClockDep, data: BookingCreate) -> Booking:
++    return bookings.create_booking(store, clock, data)
++
++
++@router.get("/bookings/{booking_id}", response_model=Booking, tags=["bookings"])
++def get_booking(store: StoreDep, booking_id: int) -> Booking:
++    return bookings.get_booking(store, booking_id)
++
++
++@router.post("/bookings/{booking_id}/cancel", response_model=Booking, tags=["bookings"])
++def cancel_booking(store: StoreDep, booking_id: int) -> Booking:
++    return bookings.cancel_booking(store, booking_id)
++
++
++@router.get("/bookings/{booking_id}/invoice", response_model=BookingInvoice, tags=["bookings"])
++def get_booking_invoice(store: StoreDep, booking_id: int) -> BookingInvoice:
++    return bookings.get_booking_invoice(store, booking_id)
++
++
+ # --- reports ---------------------------------------------------------------------------
+ 
+ 
+diff --git a/app/errors.py b/app/errors.py
+index a956bb9..71b5e64 100644
+--- a/app/errors.py
++++ b/app/errors.py
+@@ -9,6 +9,7 @@ class DomainError(Exception):
+ 
+     status_code: int = 400
+     code: str = "domain_error"
++    extra: dict[str, object] = {}
+ 
+     def __init__(self, message: str) -> None:
+         super().__init__(message)
+@@ -40,7 +41,7 @@ async def _domain_error_handler(_: Request, exc: Exception) -> JSONResponse:
+     assert isinstance(exc, DomainError)
+     return JSONResponse(
+         status_code=exc.status_code,
+-        content={"detail": exc.message, "code": exc.code},
++        content={"detail": exc.message, "code": exc.code, **exc.extra},
+     )
+ 
+ 
+diff --git a/app/models.py b/app/models.py
+index 9c82ce8..4e56b3b 100644
+--- a/app/models.py
++++ b/app/models.py
+@@ -141,6 +141,7 @@ class Reservation(DomainModel):
+     end: date
+     status: ReservationStatus = ReservationStatus.ACTIVE
+     coupon_code: str | None = None
++    booking_id: int | None = None
+     created_on: date
+     returned_on: date | None = None
+     damaged: bool = False
+@@ -151,6 +152,24 @@ class Reservation(DomainModel):
+         return (self.end - self.start).days
+ 
+ 
++class BookingCreate(DomainModel):
++    customer_id: int
++    items: list[int]
++    start: date
++    end: date = Field(description="Exclusive: the items are back on the morning of this date.")
++    coupon_code: str | None = None
++
++
++class Booking(DomainModel):
++    id: int
++    customer_id: int
++    start: date
++    end: date
++    coupon_code: str | None = None
++    status: ReservationStatus = ReservationStatus.ACTIVE
++    reservation_ids: list[int]
++
++
+ class ReturnRequest(DomainModel):
+     returned_on: date | None = Field(default=None, description="Defaults to today when omitted.")
+     damaged: bool = False
+@@ -197,6 +216,16 @@ class Invoice(DomainModel):
+     total: Money
+ 
+ 
++class BookingInvoice(DomainModel):
++    booking_id: int
++    customer_id: int
++    lines: list[InvoiceLine]
++    subtotal: Money
++    discount: Money
++    tax: Money
++    total: Money
++
++
+ # --- reports ---------------------------------------------------------------------------
+ 
+ 
+diff --git a/app/services/availability.py b/app/services/availability.py
+index 169cfda..f9837bc 100644
+--- a/app/services/availability.py
++++ b/app/services/availability.py
+@@ -43,7 +43,7 @@ def find_conflicts(
+     return conflicts
+ 
+ 
+-def _unavailable_reason(item: Item) -> str | None:
++def unavailable_reason(item: Item) -> str | None:
+     if item.status is ItemStatus.MAINTENANCE:
+         return "Item is under maintenance"
+     if item.status is ItemStatus.RETIRED:
+@@ -56,7 +56,7 @@ def check_availability(store: Store, item_id: int, start: date, end: date) -> Av
+     validate_range(start, end)
+     item = get_item(store, item_id)
+ 
+-    reason = _unavailable_reason(item)
++    reason = unavailable_reason(item)
+     conflicts = find_conflicts(store, item_id, start, end)
+     if reason is None and conflicts:
+         reason = "Item is already reserved for part of this period"
+@@ -73,7 +73,7 @@ def check_availability(store: Store, item_id: int, start: date, end: date) -> Av
+ 
+ def ensure_available(store: Store, item: Item, start: date, end: date) -> None:
+     """Raise ``ConflictError`` unless ``item`` can be reserved for ``[start, end)``."""
+-    reason = _unavailable_reason(item)
++    reason = unavailable_reason(item)
+     if reason is not None:
+         raise ConflictError(f"Item {item.id} cannot be reserved: {reason.lower()}")
+     conflicts = find_conflicts(store, item.id, start, end)
+diff --git a/app/services/bookings.py b/app/services/bookings.py
+new file mode 100644
+index 0000000..1b83d51
+--- /dev/null
++++ b/app/services/bookings.py
+@@ -0,0 +1,154 @@
++"""Bookings: several items reserved together, in one all-or-nothing request."""
++
++from app.clock import Clock
++from app.errors import ConflictError, InvalidRequestError, NotFoundError
++from app.models import (
++    Booking,
++    BookingCreate,
++    BookingInvoice,
++    InvoiceLine,
++    Reservation,
++    ReservationStatus,
++)
++from app.services.availability import find_conflicts, unavailable_reason, validate_range
++from app.services.catalog import get_item
++from app.services.customers import get_customer
++from app.services.invoices import booking_discount_rate, reservation_lines
++from app.services.pricing import TAX_RATE, ZERO, lookup_coupon, money
++from app.services.reservations import MAX_RENTAL_DAYS
++from app.storage import Store
++
++
++class ItemsUnavailableError(ConflictError):
++    """Some items of a booking cannot be reserved for the requested range."""
++
++    def __init__(self, item_ids: list[int]) -> None:
++        ids = ", ".join(str(i) for i in item_ids)
++        super().__init__(f"Items not available for this period: {ids}")
++        self.extra = {"unavailable_item_ids": item_ids}
++
++
++def _reservations(store: Store, booking: Booking) -> list[Reservation]:
++    return [store.reservations.get(rid) for rid in booking.reservation_ids]  # type: ignore[misc]
++
++
++def _with_status(store: Store, booking: Booking) -> Booking:
++    statuses = {r.status for r in _reservations(store, booking)}
++    if ReservationStatus.ACTIVE in statuses:
++        status = ReservationStatus.ACTIVE
++    elif ReservationStatus.RETURNED in statuses:
++        status = ReservationStatus.RETURNED
++    else:
++        status = ReservationStatus.CANCELLED
++    return booking.model_copy(update={"status": status})
++
++
++def get_booking(store: Store, booking_id: int) -> Booking:
++    booking = store.bookings.get(booking_id)
++    if booking is None:
++        raise NotFoundError(f"Booking {booking_id} not found")
++    return _with_status(store, booking)
++
++
++def create_booking(store: Store, clock: Clock, data: BookingCreate) -> Booking:
++    """Reserve every item in ``data.items`` for the same range, or none of them."""
++    if not data.items:
++        raise InvalidRequestError("A booking needs at least one item")
++    if len(set(data.items)) != len(data.items):
++        raise InvalidRequestError("A booking cannot contain the same item twice")
++    validate_range(data.start, data.end)
++    today = clock.today()
++    if data.start < today:
++        raise InvalidRequestError("Reservations cannot start in the past")
++    if (data.end - data.start).days > MAX_RENTAL_DAYS:
++        raise InvalidRequestError(f"Reservations are limited to {MAX_RENTAL_DAYS} days")
++
++    customer = get_customer(store, data.customer_id)
++    coupon_code: str | None = None
++    if data.coupon_code:
++        coupon = lookup_coupon(store, data.coupon_code)
++        if coupon is None:
++            raise InvalidRequestError(f"Unknown coupon code {data.coupon_code!r}")
++        coupon_code = coupon.code
++
++    items = [get_item(store, item_id) for item_id in data.items]
++    unavailable = sorted(
++        item.id
++        for item in items
++        if unavailable_reason(item) is not None
++        or find_conflicts(store, item.id, data.start, data.end)
++    )
++    if unavailable:
++        raise ItemsUnavailableError(unavailable)
++
++    booking_id = store.bookings.allocate_id()
++    reservation_ids: list[int] = []
++    for item in items:
++        reservation = Reservation(
++            id=store.reservations.allocate_id(),
++            item_id=item.id,
++            customer_id=customer.id,
++            start=data.start,
++            end=data.end,
++            coupon_code=coupon_code,
++            booking_id=booking_id,
++            created_on=today,
++        )
++        store.reservations.insert(reservation)
++        reservation_ids.append(reservation.id)
++
++    booking = Booking(
++        id=booking_id,
++        customer_id=customer.id,
++        start=data.start,
++        end=data.end,
++        coupon_code=coupon_code,
++        reservation_ids=reservation_ids,
++    )
++    store.bookings.insert(booking)
++    return _with_status(store, booking)
++
++
++def cancel_booking(store: Store, booking_id: int) -> Booking:
++    """Cancel every active reservation of the booking."""
++    booking = get_booking(store, booking_id)
++    active = [r for r in _reservations(store, booking) if r.status is ReservationStatus.ACTIVE]
++    if not active:
++        raise ConflictError(f"Booking {booking_id} has no active reservations to cancel")
++    for reservation in active:
++        store.reservations.save(
++            reservation.model_copy(update={"status": ReservationStatus.CANCELLED})
++        )
++    return _with_status(store, booking)
++
++
++def get_booking_invoice(store: Store, booking_id: int) -> BookingInvoice:
++    """One invoice for all non-cancelled reservations of the booking."""
++    booking = get_booking(store, booking_id)
++    billed = [
++        r for r in _reservations(store, booking) if r.status is not ReservationStatus.CANCELLED
++    ]
++    if not billed:
++        raise ConflictError(f"Booking {booking_id} is cancelled and has no invoice")
++
++    lines: list[InvoiceLine] = []
++    rental_total = ZERO
++    for reservation in billed:
++        reservation_lines_, rental_amount = reservation_lines(store, reservation)
++        lines.extend(reservation_lines_)
++        rental_total += rental_amount
++
++    rate = booking_discount_rate(store, booking.id)
++    subtotal = sum((line.amount for line in lines), ZERO)
++    discount = money(rental_total * rate)
++    taxable = subtotal - discount
++    tax = money(taxable * TAX_RATE)
++    return BookingInvoice(
++        booking_id=booking.id,
++        customer_id=booking.customer_id,
++        lines=lines,
++        subtotal=money(subtotal),
++        discount=discount,
++        tax=tax,
++        total=money(taxable + tax),
++    )
+diff --git a/app/services/invoices.py b/app/services/invoices.py
+index d5c4921..54006e5 100644
+--- a/app/services/invoices.py
++++ b/app/services/invoices.py
+@@ -10,7 +10,17 @@ from app.errors import ConflictError
+ from app.models import Invoice, InvoiceLine, InvoiceLineKind, Reservation, ReservationStatus
+ from app.services.catalog import get_item
+ from app.services.customers import get_customer
+-from app.services.pricing import TAX_RATE, ZERO, lookup_coupon, money, quote_rental
++from app.services.pricing import (
++    BUNDLE_DISCOUNT,
++    BUNDLE_MIN_ITEMS,
++    MAX_TOTAL_DISCOUNT,
++    TAX_RATE,
++    ZERO,
++    lookup_coupon,
++    money,
++    quote_rental,
++    resolve_discounts,
++)
+ from app.services.reservations import get_reservation
+ from app.services.returns import late_days, late_fee, late_rate
+ from app.storage import Store
+@@ -31,12 +41,33 @@ def _late_fee_line(reservation: Reservation, daily_rate: Decimal) -> InvoiceLine
+     )
+ 
+ 
+-def compute_invoice(store: Store, reservation: Reservation) -> Invoice:
+-    """Build the invoice for ``reservation`` regardless of its status."""
++def booking_discount_rate(store: Store, booking_id: int) -> Decimal:
++    """Combined discount rate of a booking: tier + coupon + bundle, capped.
++
++    The bundle discount applies while the booking has at least ``BUNDLE_MIN_ITEMS``
++    reservations that are not cancelled.
++    """
++    booking = store.bookings.get(booking_id)
++    assert booking is not None
++    customer = get_customer(store, booking.customer_id)
++    coupon = lookup_coupon(store, booking.coupon_code) if booking.coupon_code else None
++    rate = resolve_discounts(customer.tier, coupon).total_rate
++    billed = [
++        rid
++        for rid in booking.reservation_ids
++        if (r := store.reservations.get(rid)) is not None
++        and r.status is not ReservationStatus.CANCELLED
++    ]
++    if len(billed) >= BUNDLE_MIN_ITEMS:
++        rate += BUNDLE_DISCOUNT
++    return min(rate, MAX_TOTAL_DISCOUNT)
++
++
++def reservation_lines(store: Store, reservation: Reservation) -> tuple[list[InvoiceLine], Decimal]:
++    """Invoice lines of one reservation and its (undiscounted) rental amount."""
+     item = get_item(store, reservation.item_id)
+     customer = get_customer(store, reservation.customer_id)
+-    coupon = lookup_coupon(store, reservation.coupon_code) if reservation.coupon_code else None
+-    quote = quote_rental(item, customer, reservation.start, reservation.end, coupon)
++    quote = quote_rental(item, customer, reservation.start, reservation.end)
+ 
+     free_note = f", {quote.free_days} free" if quote.free_days else ""
+     lines = [
+@@ -51,10 +82,24 @@ def compute_invoice(store: Store, reservation: Reservation) -> Invoice:
+     late_line = _late_fee_line(reservation, item.daily_rate)
+     if late_line is not None:
+         lines.append(late_line)
++    return lines, quote.rental_amount
++
++
++def compute_invoice(store: Store, reservation: Reservation) -> Invoice:
++    """Build the invoice for ``reservation`` regardless of its status."""
++    customer = get_customer(store, reservation.customer_id)
++    lines, rental_amount = reservation_lines(store, reservation)
++    if reservation.booking_id is not None:
++        rate = booking_discount_rate(store, reservation.booking_id)
++    else:
++        coupon = (
++            lookup_coupon(store, reservation.coupon_code) if reservation.coupon_code else None
++        )
++        rate = resolve_discounts(customer.tier, coupon).total_rate
+ 
+     subtotal = sum((line.amount for line in lines), ZERO)
+ 
+-    discount = money(quote.rental_amount * quote.discounts.total_rate)
++    discount = money(rental_amount * rate)
+     taxable = subtotal - discount
+     tax = money(taxable * TAX_RATE)
+ 
+diff --git a/app/services/pricing.py b/app/services/pricing.py
+index 2ad2dbd..4051aaa 100644
+--- a/app/services/pricing.py
++++ b/app/services/pricing.py
+@@ -13,6 +13,8 @@ ZERO = Decimal("0")
+ TAX_RATE = Decimal("0.20")
+ MAX_TOTAL_DISCOUNT = Decimal("0.30")
+ FREE_DAY_EVERY = 7
++BUNDLE_DISCOUNT = Decimal("0.05")
++BUNDLE_MIN_ITEMS = 3
+ 
+ TIER_DISCOUNTS: dict[CustomerTier, Decimal] = {
+     CustomerTier.REGULAR: Decimal("0"),
+diff --git a/app/storage.py b/app/storage.py
+index 3751a24..e0e4619 100644
+--- a/app/storage.py
++++ b/app/storage.py
+@@ -9,6 +9,7 @@ from dataclasses import dataclass, field
+ from pydantic import BaseModel
+ 
+ from app.models import (
++    Booking,
+     Category,
+     Coupon,
+     CouponCreate,
+@@ -107,6 +108,10 @@ class ReservationRepository(IntIdRepository[Reservation]):
+         return [r for r in self.all() if r.customer_id == customer_id]
+ 
+ 
++class BookingRepository(IntIdRepository[Booking]):
++    pass
++
++
+ class CouponRepository(InMemoryRepository[str, Coupon]):
+     def _key(self, entity: Coupon) -> str:
+         return entity.code
+@@ -127,6 +132,7 @@ class Store:
+     customers: CustomerRepository = field(default_factory=CustomerRepository)
+     reservations: ReservationRepository = field(default_factory=ReservationRepository)
+     coupons: CouponRepository = field(default_factory=CouponRepository)
++    bookings: BookingRepository = field(default_factory=BookingRepository)
+ 
+     @classmethod
+     def seeded(cls) -> "Store":

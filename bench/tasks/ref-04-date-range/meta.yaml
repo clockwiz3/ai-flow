@@ -1,6 +1,6 @@
 id: ref-04-date-range
 title: Introduce a DateRange value object for half-open date ranges
 kind: refactor
-difficulty: medium
+difficulty: hard
 expected: solve
 tags: [refactor, dates, availability]

@@ -1,0 +1,6 @@
+id: ref-03-service-classes
+title: Turn the service functions into injected service classes wired via FastAPI dependencies
+kind: refactor
+difficulty: hard
+expected: solve
+tags: []

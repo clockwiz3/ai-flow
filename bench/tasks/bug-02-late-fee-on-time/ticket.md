@@ -1,35 +1,30 @@
-# Customers returning on the due date get charged a late day
+# Customer complaint: charged a late fee for a saw returned on time
 
-**Reported by:** customer support
-**Severity:** medium - several complaints and manual refunds this week
+**Reported by:** customer support (forwarded e-mail)
+**Severity:** medium - the customer wants a refund and says she will not rent from us again
 
-## What happens
+## Customer's message (summarised)
 
-A customer who brings an item back on the reservation's `end` date - which is exactly when
-it is due back - is charged one day of late fee. Every late return also seems to be billed
-one day more than it should be.
+> I rented a Circular Saw from you from 1 June to 4 June 2025. When I booked, I was told to
+> bring it back on the 4th, and I did - I dropped it off at the counter on the morning of
+> 4 June. My invoice now has an extra "late fee" of 27.00 on it and the total is 97.20
+> instead of the 64.80 I expected. Why am I paying for being late when I returned it on the
+> agreed date?
 
-Per the README, returning on the `end` date (or earlier) is on time (0 late days), returning
-on `end + 1` is 1 late day, and the late fee is `daily_rate * 1.5 * late_days`.
+## What we found in the system (demo data)
 
-## Example (demo data)
-
-Reservation 4: Circular Saw (item 2, 18.00/day), 2025-06-01 to 2025-06-04, regular customer.
-On 2025-06-04 the customer returns it:
+This is reservation 4 (item 2, Circular Saw, 18.00/day, regular customer, 2025-06-01 to
+2025-06-04). The return was registered with:
 
 ```
 POST /reservations/4/return
 {"returned_on": "2025-06-04"}
 ```
 
-- **Actual:** `"late_days": 1`, `"late_fee": "27.00"`, and the invoice
-  (`GET /reservations/4/invoice`) contains a `late_fee` line; total `97.20`.
-- **Expected:** `"late_days": 0`, `"late_fee": "0.00"`, invoice has only the rental line;
-  subtotal `54.00`, tax `10.80`, total `64.80`.
+The return receipt shows `"late_days": 1` and `"late_fee": "27.00"`, and
+`GET /reservations/4/invoice` has a `late_fee` line next to the rental line, total `97.20`.
 
-Returning on 2025-06-06 should be 2 late days (fee `54.00`), but we currently charge 3.
+## Expected
 
-## Acceptance criteria
-
-- Return receipts and invoices compute late days as described in the README.
-- On-time and early returns have no late fee and no `late_fee` invoice line.
+Returns, late fees and invoices follow the rules in the README. This customer should not have
+been charged anything beyond the rental.

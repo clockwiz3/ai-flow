@@ -1,0 +1,383 @@
+diff --git a/README.md b/README.md
+index 1b28a59..08b2da9 100644
+--- a/README.md
++++ b/README.md
+@@ -1,8 +1,8 @@
+ # Rentwise
+ 
+ Rentwise is the back-office API of a small equipment rental shop: power tools, camping gear,
+-photo equipment and garden machines. It is a FastAPI service with in-memory storage, seeded
+-with demo data on start-up.
++photo equipment and garden machines. It is a FastAPI service storing its data in SQLite
++(standard-library `sqlite3`), seeded with demo data on start-up.
+ 
+ This README is the **specification**. Where the code and this document disagree, the code
+ is wrong.
+@@ -15,7 +15,8 @@ ruff check .       # lint
+ ```
+ 
+ `app.main:create_app(store=None, clock=None)` builds an application. By default it uses a
+-freshly seeded `Store` and the system clock; tests inject a `FixedClock` pinned to
++freshly seeded `Store` and the system clock; `Store(db_path=":memory:")` opens its own SQLite
++database (the default `":memory:"` gives every store a private, empty database); tests inject a `FixedClock` pinned to
+ 2025-06-02 (`app.seed.SEED_TODAY`).
+ 
+ ## Layout
+@@ -23,7 +24,7 @@ freshly seeded `Store` and the system clock; tests inject a `FixedClock` pinned
+ | Path | Purpose |
+ | --- | --- |
+ | `app/models.py` | Pydantic models and enums |
+-| `app/storage.py` | In-memory repositories, `Store`, seed loader |
++| `app/storage.py` | SQLite repositories, `Store`, seed loader |
+ | `app/seed.py` | Demo data |
+ | `app/clock.py` | Injectable "today" |
+ | `app/errors.py` | Domain exceptions -> HTTP errors |
+diff --git a/app/__init__.py b/app/__init__.py
+index 2e5dae1..c692a26 100644
+--- a/app/__init__.py
++++ b/app/__init__.py
+@@ -1,3 +1,3 @@
+-"""Rentwise: an in-memory equipment rental shop service."""
++"""Rentwise: an equipment rental shop service."""
+ 
+ __version__ = "0.1.0"
+diff --git a/app/main.py b/app/main.py
+index b35e2bd..b782ceb 100644
+--- a/app/main.py
++++ b/app/main.py
+@@ -12,8 +12,8 @@ from app.storage import Store
+ def create_app(store: Store | None = None, clock: Clock | None = None) -> FastAPI:
+     """Build a Rentwise application.
+ 
+-    ``store`` defaults to a freshly seeded in-memory store and ``clock`` to the system
+-    clock; tests pass their own instances to control data and "today".
++    ``store`` defaults to a freshly seeded store (a private in-memory SQLite database) and
++    ``clock`` to the system clock; tests pass their own instances to control data and "today".
+     """
+     app = FastAPI(
+         title="Rentwise",
+diff --git a/app/services/__init__.py b/app/services/__init__.py
+index 306c12d..bc2b183 100644
+--- a/app/services/__init__.py
++++ b/app/services/__init__.py
+@@ -1 +1 @@
+-"""Service layer: business rules on top of the in-memory store."""
++"""Service layer: business rules on top of the store."""
+diff --git a/app/storage.py b/app/storage.py
+index 3751a24..c5f64b3 100644
+--- a/app/storage.py
++++ b/app/storage.py
+@@ -1,10 +1,21 @@
+-"""In-memory repositories and the ``Store`` that groups them.
++"""SQLite-backed repositories and the ``Store`` that groups them.
+ 
+ Nothing here knows about business rules; repositories only store, fetch and allocate ids.
++Every ``Store`` owns one SQLite connection; the default database is ``":memory:"``, so each
++store (and therefore each application instance) starts from an empty, private database.
++
++Values are stored as TEXT where Python types have no exact SQLite equivalent: money as the
++``str()`` of the ``Decimal`` (``"12.50"`` stays ``"12.50"``), dates as ISO strings and enums
++as their values. Rows are turned back into the pydantic models on the way out.
+ """
+ 
++import sqlite3
++import threading
+ from collections.abc import Iterator
+-from dataclasses import dataclass, field
++from datetime import date
++from decimal import Decimal
++from enum import Enum
++from typing import Any, ClassVar
+ 
+ from pydantic import BaseModel
+ 
+@@ -19,97 +30,207 @@ from app.models import (
+     Reservation,
+ )
+ 
++SCHEMA = """
++CREATE TABLE IF NOT EXISTS categories (
++    id TEXT PRIMARY KEY,
++    name TEXT NOT NULL
++);
++CREATE TABLE IF NOT EXISTS items (
++    id INTEGER PRIMARY KEY,
++    name TEXT NOT NULL,
++    category TEXT NOT NULL,
++    daily_rate TEXT NOT NULL,
++    deposit TEXT NOT NULL,
++    status TEXT NOT NULL
++);
++CREATE TABLE IF NOT EXISTS customers (
++    id INTEGER PRIMARY KEY,
++    name TEXT NOT NULL,
++    email TEXT NOT NULL,
++    tier TEXT NOT NULL
++);
++CREATE TABLE IF NOT EXISTS coupons (
++    code TEXT PRIMARY KEY,
++    percent INTEGER NOT NULL
++);
++CREATE TABLE IF NOT EXISTS reservations (
++    id INTEGER PRIMARY KEY,
++    item_id INTEGER NOT NULL,
++    customer_id INTEGER NOT NULL,
++    start TEXT NOT NULL,
++    "end" TEXT NOT NULL,
++    status TEXT NOT NULL,
++    coupon_code TEXT,
++    created_on TEXT NOT NULL,
++    returned_on TEXT,
++    damaged INTEGER NOT NULL
++);
++CREATE TABLE IF NOT EXISTS id_sequences (
++    name TEXT PRIMARY KEY,
++    next_id INTEGER NOT NULL
++);
++"""
++
++
++def _to_db(value: Any) -> Any:
++    """Convert a model field value into something SQLite stores without loss."""
++    if isinstance(value, Enum):
++        return value.value
++    if isinstance(value, bool):
++        return int(value)
++    if isinstance(value, Decimal):
++        return str(value)
++    if isinstance(value, date):
++        return value.isoformat()
++    return value
++
+ 
+-class InMemoryRepository[K, T: BaseModel]:
+-    """Dictionary-backed repository keyed by ``K``."""
++class SqliteRepository[K, T: BaseModel]:
++    """Table-backed repository keyed by ``K``."""
+ 
+-    def __init__(self) -> None:
+-        self._rows: dict[K, T] = {}
++    table: ClassVar[str]
++    key_column: ClassVar[str]
++    model: ClassVar[type[BaseModel]]
++
++    def __init__(self, connection: sqlite3.Connection, lock: threading.RLock) -> None:
++        self._db = connection
++        self._lock = lock
++        self._columns = list(self.model.model_fields)
+ 
+     def _key(self, entity: T) -> K:
+-        raise NotImplementedError
++        return getattr(entity, self.key_column)
++
++    def _row(self, entity: T) -> list[Any]:
++        return [_to_db(getattr(entity, column)) for column in self._columns]
++
++    def _entity(self, row: sqlite3.Row) -> T:
++        return self.model.model_validate(dict(row))  # type: ignore[return-value]
++
++    def _select(self, where: str = "", params: tuple[Any, ...] = ()) -> list[T]:
++        sql = f"SELECT * FROM {self.table} {where} ORDER BY {self.key_column}"
++        with self._lock:
++            rows = self._db.execute(sql, params).fetchall()
++        return [self._entity(row) for row in rows]
++
++    def _write(self, verb: str, entity: T) -> None:
++        columns = ", ".join(f'"{c}"' for c in self._columns)
++        marks = ", ".join("?" for _ in self._columns)
++        with self._lock:
++            self._db.execute(
++                f"{verb} INTO {self.table} ({columns}) VALUES ({marks})", self._row(entity)
++            )
+ 
+     def insert(self, entity: T) -> T:
+         """Add a new entity; its key must not exist yet."""
+-        key = self._key(entity)
+-        if key in self._rows:
+-            raise KeyError(f"duplicate key {key!r}")
+-        self._rows[key] = entity
++        try:
++            self._write("INSERT", entity)
++        except sqlite3.IntegrityError as exc:
++            raise KeyError(f"duplicate key {self._key(entity)!r}") from exc
+         return entity
+ 
+     def save(self, entity: T) -> T:
+         """Insert or replace an entity."""
+-        self._rows[self._key(entity)] = entity
++        self._write("INSERT OR REPLACE", entity)
+         return entity
+ 
+     def get(self, key: K) -> T | None:
+-        return self._rows.get(key)
++        found = self._select(f"WHERE {self.key_column} = ?", (key,))
++        return found[0] if found else None
+ 
+     def all(self) -> list[T]:
+         """All entities ordered by key."""
+-        return [self._rows[key] for key in sorted(self._rows)]  # type: ignore[type-var]
++        return self._select()
+ 
+     def __iter__(self) -> Iterator[T]:
+         return iter(self.all())
+ 
+     def __len__(self) -> int:
+-        return len(self._rows)
++        with self._lock:
++            return self._db.execute(f"SELECT COUNT(*) FROM {self.table}").fetchone()[0]
+ 
+     def __contains__(self, key: object) -> bool:
+-        return key in self._rows
++        with self._lock:
++            row = self._db.execute(
++                f"SELECT 1 FROM {self.table} WHERE {self.key_column} = ?", (key,)
++            ).fetchone()
++        return row is not None
++
+ 
++class IntIdRepository[T: BaseModel](SqliteRepository[int, T]):
++    """Repository for entities with an auto-incrementing integer ``id``.
+ 
+-class IntIdRepository[T: BaseModel](InMemoryRepository[int, T]):
+-    """Repository for entities with an auto-incrementing integer ``id``."""
++    The next id lives in ``id_sequences`` so that it never goes backwards and is shared by
++    every connection to the same database file.
++    """
+ 
+-    def __init__(self) -> None:
+-        super().__init__()
+-        self._next_id = 1
++    key_column = "id"
+ 
+-    def _key(self, entity: T) -> int:
+-        return entity.id  # type: ignore[attr-defined]
++    def _next_id(self) -> int:
++        row = self._db.execute(
++            "SELECT next_id FROM id_sequences WHERE name = ?", (self.table,)
++        ).fetchone()
++        return row[0] if row is not None else 1
++
++    def _set_next_id(self, value: int) -> None:
++        self._db.execute(
++            "INSERT OR REPLACE INTO id_sequences (name, next_id) VALUES (?, ?)",
++            (self.table, value),
++        )
+ 
+     def allocate_id(self) -> int:
+-        new_id = self._next_id
+-        self._next_id += 1
++        with self._lock:
++            new_id = self._next_id()
++            self._set_next_id(new_id + 1)
+         return new_id
+ 
+     def insert(self, entity: T) -> T:
+-        stored = super().insert(entity)
+-        self._next_id = max(self._next_id, self._key(entity) + 1)
++        with self._lock:
++            stored = super().insert(entity)
++            self._set_next_id(max(self._next_id(), self._key(entity) + 1))
+         return stored
+ 
+ 
+-class CategoryRepository(InMemoryRepository[str, Category]):
+-    def _key(self, entity: Category) -> str:
+-        return entity.id
++class CategoryRepository(SqliteRepository[str, Category]):
++    table = "categories"
++    key_column = "id"
++    model = Category
+ 
+ 
+ class ItemRepository(IntIdRepository[Item]):
++    table = "items"
++    model = Item
++
+     def create(self, data: ItemCreate) -> Item:
+         return self.insert(Item(id=self.allocate_id(), **data.model_dump()))
+ 
+ 
+ class CustomerRepository(IntIdRepository[Customer]):
++    table = "customers"
++    model = Customer
++
+     def create(self, data: CustomerCreate) -> Customer:
+         return self.insert(Customer(id=self.allocate_id(), **data.model_dump()))
+ 
+     def by_email(self, email: str) -> Customer | None:
+-        email = email.strip().lower()
+-        return next((c for c in self._rows.values() if c.email == email), None)
++        found = self._select("WHERE email = ?", (email.strip().lower(),))
++        return found[0] if found else None
+ 
+ 
+ class ReservationRepository(IntIdRepository[Reservation]):
++    table = "reservations"
++    model = Reservation
++
+     def for_item(self, item_id: int) -> list[Reservation]:
+-        return [r for r in self.all() if r.item_id == item_id]
++        return self._select("WHERE item_id = ?", (item_id,))
+ 
+     def for_customer(self, customer_id: int) -> list[Reservation]:
+-        return [r for r in self.all() if r.customer_id == customer_id]
++        return self._select("WHERE customer_id = ?", (customer_id,))
+ 
+ 
+-class CouponRepository(InMemoryRepository[str, Coupon]):
+-    def _key(self, entity: Coupon) -> str:
+-        return entity.code
++class CouponRepository(SqliteRepository[str, Coupon]):
++    table = "coupons"
++    key_column = "code"
++    model = Coupon
+ 
+     def create(self, data: CouponCreate) -> Coupon:
+         return self.insert(Coupon(**data.model_dump()))
+@@ -118,23 +239,36 @@ class CouponRepository(InMemoryRepository[str, Coupon]):
+         return super().get(key.strip().upper())
+ 
+ 
+-@dataclass
+ class Store:
+-    """All repositories of one running application instance."""
+-
+-    categories: CategoryRepository = field(default_factory=CategoryRepository)
+-    items: ItemRepository = field(default_factory=ItemRepository)
+-    customers: CustomerRepository = field(default_factory=CustomerRepository)
+-    reservations: ReservationRepository = field(default_factory=ReservationRepository)
+-    coupons: CouponRepository = field(default_factory=CouponRepository)
++    """All repositories of one running application instance, sharing one SQLite database.
++
++    ``db_path`` is passed to ``sqlite3.connect``; the default ``":memory:"`` gives every store
++    its own private, empty database. A file path keeps the data between stores.
++    """
++
++    def __init__(self, db_path: str = ":memory:") -> None:
++        self.db_path = db_path
++        self.connection = sqlite3.connect(db_path, check_same_thread=False, isolation_level=None)
++        self.connection.row_factory = sqlite3.Row
++        self._lock = threading.RLock()
++        with self._lock:
++            self.connection.executescript(SCHEMA)
++        self.categories = CategoryRepository(self.connection, self._lock)
++        self.items = ItemRepository(self.connection, self._lock)
++        self.customers = CustomerRepository(self.connection, self._lock)
++        self.reservations = ReservationRepository(self.connection, self._lock)
++        self.coupons = CouponRepository(self.connection, self._lock)
+ 
+     @classmethod
+-    def seeded(cls) -> "Store":
++    def seeded(cls, db_path: str = ":memory:") -> "Store":
+         """A new store pre-populated with the demo data from ``app.seed``."""
+-        store = cls()
++        store = cls(db_path)
+         load_seed(store)
+         return store
+ 
++    def close(self) -> None:
++        self.connection.close()
++
+ 
+ def load_seed(store: Store) -> None:
+     """Insert the demo data from ``app.seed`` into ``store``."""

@@ -1,0 +1,6 @@
+id: feat-03-weekend-surcharge
+title: Weekend surcharge per category
+kind: feature
+difficulty: hard
+expected: solve
+tags: [pricing, invoices, reports, reservations, api, dates, rounding]

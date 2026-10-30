@@ -1,0 +1,6 @@
+id: feat-07-multi-item-booking
+title: Multi-item bookings with a bundle discount
+kind: feature
+difficulty: hard
+expected: solve
+tags: [reservations, availability, pricing, invoices, reports, api, transactions]
