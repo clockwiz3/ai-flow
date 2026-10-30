@@ -173,8 +173,7 @@ async def run_eval(
                 print(f"harness error in {task.id}/{config}/{repeat}: {type(exc).__name__}: {exc}")
                 return
         out_file.parent.mkdir(parents=True, exist_ok=True)
-        with out_file.open("a", encoding="utf-8", newline="
-") as f:
+        with out_file.open("a", encoding="utf-8", newline="\n") as f:
             f.write(record.model_dump_json() + "\n")
         records.append(record)
         if on_record:
