@@ -136,7 +136,9 @@ class AgentLoop:
             if estimate_tokens(messages) > cfg.context_tokens:
                 try:
                     messages, extra_usage, extra_cost = await self._compact(system, messages, name)
-                except (LLMError, BudgetExceeded) as exc:
+                except BudgetExceeded:
+                    raise
+                except LLMError as exc:
                     return finish("error", error=f"compaction failed: {exc}")
                 usage, cost = usage + extra_usage, cost + extra_cost
                 result.messages = messages
@@ -153,8 +155,8 @@ class AgentLoop:
                     variant=cfg.variant,
                     name=f"{name}.step{step}",
                 )
-            except BudgetExceeded as exc:
-                return finish("max_usd", error=str(exc))
+            except BudgetExceeded:
+                raise  # the client-wide budget: stop everything, this is not the agent's failure
             except LLMError as exc:
                 return finish("error", error=str(exc))
             usage, cost = usage + response.usage, cost + response.cost_usd

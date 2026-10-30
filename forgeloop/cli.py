@@ -1,4 +1,4 @@
-"""Command line: `forgeloop solve` runs one agent on one ticket end to end."""
+"""Command line: solve one ticket, validate the bench, run the eval, print reports."""
 
 from __future__ import annotations
 
@@ -10,8 +10,9 @@ from typing import Annotated
 
 import typer
 
-from forgeloop import workspace
+from forgeloop import bench, report, workspace
 from forgeloop.agent_loop import AgentConfig, AgentLoop, AgentResult
+from forgeloop.eval import PIPELINES, RESULTS, EvalSettings, RunRecord, load_records, run_eval
 from forgeloop.grading import Grade, grade
 from forgeloop.roles import implementer
 from forgeloop.tools import DockerSandbox, Workspace, default_toolbox
@@ -87,3 +88,82 @@ def solve(
         if not verdict.passed:
             typer.echo(verdict.output[-2000:])
     typer.echo(f"workspace: {RUNS / run_id / 'workspace'}; total spent this process: ${meter.spent_usd:.4f}")
+
+
+async def _require_docker() -> None:
+    if not await docker_ready():
+        raise typer.BadParameter("Docker is not running: agents only execute commands inside the sandbox")
+    await ensure_image()
+
+
+@app.command()
+def validate(
+    task: Annotated[list[str] | None, typer.Option(help="Task ids (default: all)")] = None,
+) -> None:
+    """Check every task: hidden tests fail on the bare repo and pass (3x, no flakes) with the reference patch."""
+
+    async def go() -> list[bench.Validation]:
+        await _require_docker()
+        return await bench.validate_all(bench.load_tasks(ids=task))
+
+    results = asyncio.run(go())
+    for v in results:
+        typer.echo(f"{'OK  ' if v.ok else 'FAIL'} {v.task_id}")
+        for p in v.problems:
+            typer.echo("     " + p.replace("\n", "\n     "))
+    bad = [v for v in results if not v.ok]
+    typer.echo(f"{len(results) - len(bad)}/{len(results)} tasks valid")
+    if bad:
+        raise typer.Exit(1)
+
+
+@app.command("eval")
+def eval_(
+    eval_id: Annotated[str, typer.Option("--id", help="Name of the eval; results go to evals/results/<id>.jsonl")],
+    config: Annotated[list[str], typer.Option(help=f"Pipelines: {sorted(PIPELINES)}")] = ["baseline"],  # noqa: B006
+    task: Annotated[list[str] | None, typer.Option(help="Task ids (default: all)")] = None,
+    repeats: Annotated[int, typer.Option(min=1)] = 1,
+    model: Annotated[str, typer.Option()] = DEFAULT_MODEL,
+    budget_usd: Annotated[float, typer.Option(help="Hard stop for the whole eval")] = 2.0,
+    max_usd_per_run: Annotated[float, typer.Option()] = 0.40,
+    concurrency: Annotated[int, typer.Option(min=1, max=8)] = 4,
+) -> None:
+    """Run tasks x configs x repeats. Re-running with the same --id resumes and skips finished runs."""
+    load_dotenv()
+    unknown = set(config) - set(PIPELINES)
+    if unknown:
+        raise typer.BadParameter(f"unknown configs {sorted(unknown)}; available: {sorted(PIPELINES)}")
+    tasks = bench.load_tasks(ids=task)
+    settings = EvalSettings(model=model, max_usd_per_run=max_usd_per_run)
+
+    def show(r: RunRecord) -> None:
+        mark = "PASS" if r.passed else "fail"
+        typer.echo(f"{mark} {r.task_id:28} {r.config:10} #{r.repeat} {r.status:10} {r.steps:3} steps ${r.cost_usd:.4f}")
+
+    async def go() -> list[RunRecord]:
+        await _require_docker()
+        tracer = Tracer(RUNS / "trace.sqlite")
+        client = LLMClient(
+            cache=ResponseCache(), meter=Meter(limit_usd=budget_usd), tracer=tracer, prices=PriceTable.load()
+        )
+        try:
+            return await run_eval(
+                client, tracer, eval_id, tasks, config, repeats, settings, concurrency=concurrency, on_record=show
+            )
+        finally:
+            typer.echo(f"spent ${client.meter.spent_usd:.4f} (cache saved ${client.meter.saved_usd:.4f})")
+            await client.aclose()
+
+    records = asyncio.run(go())
+    typer.echo("\n" + report.summary_table(records))
+
+
+@app.command("report")
+def report_(eval_id: Annotated[str, typer.Option("--id")]) -> None:
+    """Summary and per-task tables for an eval."""
+    records = load_records(RESULTS / f"{eval_id}.jsonl")
+    if not records:
+        raise typer.BadParameter(f"no results for {eval_id}")
+    typer.echo(report.summary_table(records))
+    typer.echo("")
+    typer.echo(report.per_task_table(records))

@@ -17,12 +17,17 @@ def git(ws: Path, *args: str) -> str:
     return out.stdout
 
 
-def prepare(source: Path, dest: Path, branch: str) -> Path:
-    """Copy `source` into `dest`, commit it as the baseline on `main`, switch to `branch` for the agent's work."""
+def prepare(source: Path, dest: Path, branch: str, *, setup: Path | None = None) -> Path:
+    """Copy `source` into `dest`, commit it as the baseline on `main`, switch to `branch` for the agent's work.
+
+    `setup` is a patch that becomes part of the baseline (a task's starting state differs from the bare repo).
+    """
     if dest.exists():
         raise FileExistsError(dest)
     shutil.copytree(source, dest, ignore=shutil.ignore_patterns(*EXCLUDE))
     git(dest, "init", "-q", "-b", "main")
+    if setup is not None:
+        apply_patch(dest, setup)
     git(dest, "add", "-A")
     git(dest, "commit", "-q", "-m", "baseline")
     git(dest, "switch", "-q", "-c", branch)
@@ -40,3 +45,7 @@ def commit_all(ws: Path, message: str) -> str | None:
 
 def diff(ws: Path, base: str = "main") -> str:
     return git(ws, "diff", f"{base}...HEAD")
+
+
+def apply_patch(ws: Path, patch: Path) -> None:
+    git(ws, "apply", "--whitespace=nowarn", str(patch.resolve()))
