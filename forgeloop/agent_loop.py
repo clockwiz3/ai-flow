@@ -7,6 +7,7 @@ is something an agent SDK would hide, and something the eval needs to see and co
 from __future__ import annotations
 
 import json
+import time
 from dataclasses import dataclass, field
 from typing import Literal
 
@@ -193,10 +194,14 @@ class AgentLoop:
     async def _execute(self, call: ToolUseBlock) -> tuple[str, bool]:
         if call.parse_error:
             return f"could not run {call.name}: {call.parse_error}. Send the arguments as a JSON object.", True
+        started = time.perf_counter()
         output, is_error = await self.toolbox.call(call.name, call.input)
+        elapsed = time.perf_counter() - started
         output = truncate(output, self.config.tool_result_chars)
         if self.tracer:
-            self.tracer.event("tool", call.name, args=call.input, is_error=is_error, output_chars=len(output))
+            self.tracer.event(
+                "tool", call.name, duration_s=elapsed, args=call.input, is_error=is_error, output_chars=len(output)
+            )
         return output, is_error
 
     async def _compact(
