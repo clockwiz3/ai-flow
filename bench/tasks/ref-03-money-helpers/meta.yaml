@@ -1,0 +1,6 @@
+id: ref-03-money-helpers
+title: Centralise money rounding and percent application in app/money.py
+kind: refactor
+difficulty: easy
+expected: solve
+tags: [refactor, money]

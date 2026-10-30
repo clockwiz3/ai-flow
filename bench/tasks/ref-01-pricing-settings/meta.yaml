@@ -1,0 +1,6 @@
+id: ref-01-pricing-settings
+title: Move pricing and booking rule constants into app/settings.py
+kind: refactor
+difficulty: medium
+expected: solve
+tags: [refactor, pricing, settings]

@@ -1,0 +1,6 @@
+id: feat-06-loyalty-points
+title: Loyalty points for customers
+kind: feature
+difficulty: medium
+expected: escalate
+tags: [ambiguous, pricing, customers]

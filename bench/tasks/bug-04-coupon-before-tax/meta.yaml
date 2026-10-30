@@ -1,0 +1,6 @@
+id: bug-04-coupon-before-tax
+title: Coupon discount is applied after tax on invoices
+kind: bug
+difficulty: medium
+expected: solve
+tags: [invoices, pricing, money]

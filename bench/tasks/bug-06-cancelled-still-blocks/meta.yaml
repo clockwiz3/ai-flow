@@ -1,0 +1,6 @@
+id: bug-06-cancelled-still-blocks
+title: Cancelled reservations still block the item
+kind: bug
+difficulty: medium
+expected: solve
+tags: [availability, reservations]

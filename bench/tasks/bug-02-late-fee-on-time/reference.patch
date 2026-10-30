@@ -1,0 +1,25 @@
+diff --git a/app/services/returns.py b/app/services/returns.py
+index d4cdcba..05764c0 100644
+--- a/app/services/returns.py
++++ b/app/services/returns.py
+@@ -1,6 +1,6 @@
+ """Handling item returns: late fees and deposits."""
+ 
+-from datetime import date, timedelta
++from datetime import date
+ from decimal import Decimal
+ 
+ from app.clock import Clock
+@@ -17,10 +17,9 @@ LATE_FEE_MULTIPLIER = Decimal("1.5")
+ def late_days(end: date, returned_on: date) -> int:
+     """Number of chargeable late days for an item due back on ``end``.
+ 
+-    ``end`` is exclusive, so the last day the customer paid for is ``end - 1``.
++    Returning on ``end`` (the morning the item is due back) or earlier is on time.
+     """
+-    last_rental_day = end - timedelta(days=1)
+-    return max(0, (returned_on - last_rental_day).days)
++    return max(0, (returned_on - end).days)
+ 
+ 
+ def late_rate(daily_rate: Decimal) -> Decimal:

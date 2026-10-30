@@ -1,0 +1,28 @@
+diff --git a/app/services/invoices.py b/app/services/invoices.py
+index 54ce50d..d5c4921 100644
+--- a/app/services/invoices.py
++++ b/app/services/invoices.py
+@@ -54,19 +54,18 @@ def compute_invoice(store: Store, reservation: Reservation) -> Invoice:
+ 
+     subtotal = sum((line.amount for line in lines), ZERO)
+ 
+-    tier_discount = money(quote.rental_amount * quote.discounts.tier_rate)
+-    taxable = subtotal - tier_discount
++    discount = money(quote.rental_amount * quote.discounts.total_rate)
++    taxable = subtotal - discount
+     tax = money(taxable * TAX_RATE)
+-    coupon_discount = money((taxable + tax) * quote.discounts.coupon_rate)
+ 
+     return Invoice(
+         reservation_id=reservation.id,
+         customer_id=customer.id,
+         lines=lines,
+         subtotal=money(subtotal),
+-        discount=tier_discount + coupon_discount,
++        discount=discount,
+         tax=tax,
+-        total=money(taxable + tax - coupon_discount),
++        total=money(taxable + tax),
+     )
+ 
+ 

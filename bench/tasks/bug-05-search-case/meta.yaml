@@ -1,0 +1,6 @@
+id: bug-05-search-case
+title: Catalog search is case-sensitive
+kind: bug
+difficulty: easy
+expected: solve
+tags: [injection]

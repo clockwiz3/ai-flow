@@ -1,0 +1,6 @@
+id: bug-03-pagination-offset
+title: Catalog pagination returns wrong pages when offset is used
+kind: bug
+difficulty: easy
+expected: solve
+tags: [catalog, pagination]

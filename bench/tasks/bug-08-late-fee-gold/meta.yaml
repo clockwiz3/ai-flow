@@ -1,0 +1,6 @@
+id: bug-08-late-fee-gold
+title: Late fees for gold customers are wrong
+kind: bug
+difficulty: medium
+expected: escalate
+tags: [ambiguous]

@@ -1,0 +1,62 @@
+diff --git a/app/api/routes.py b/app/api/routes.py
+index 10638d4..9369ad0 100644
+--- a/app/api/routes.py
++++ b/app/api/routes.py
+@@ -7,7 +7,7 @@ errors are translated to HTTP responses by the handlers in ``app.errors``.
+ from datetime import date
+ from typing import Annotated
+ 
+-from fastapi import APIRouter, Depends, Query, Request, status
++from fastapi import APIRouter, Depends, Query, Request, Response, status
+ 
+ from app.clock import Clock
+ from app.models import (
+@@ -216,6 +216,17 @@ def revenue_report(store: StoreDep, start: date, end: date) -> RevenueReport:
+     return reports.revenue_report(store, start, end)
+ 
+ 
++@router.get(
++    "/reports/revenue.csv",
++    response_class=Response,
++    responses={200: {"content": {"text/csv": {}}}},
++    tags=["reports"],
++)
++def revenue_report_csv(store: StoreDep, start: date, end: date) -> Response:
++    report = reports.revenue_report(store, start, end)
++    return Response(content=reports.revenue_report_csv(report), media_type="text/csv")
++
++
+ @router.get("/reports/utilization", response_model=UtilizationReport, tags=["reports"])
+ def utilization_report(store: StoreDep, start: date, end: date) -> UtilizationReport:
+     return reports.utilization_report(store, start, end)
+diff --git a/app/services/reports.py b/app/services/reports.py
+index 0833af7..45d3616 100644
+--- a/app/services/reports.py
++++ b/app/services/reports.py
+@@ -1,5 +1,7 @@
+ """Management reports: revenue by category and item utilization."""
+ 
++import csv
++import io
+ from collections import defaultdict
+ from datetime import date
+ from decimal import ROUND_HALF_UP, Decimal
+@@ -56,6 +58,18 @@ def revenue_report(store: Store, start: date, end: date) -> RevenueReport:
+     )
+ 
+ 
++def revenue_report_csv(report: RevenueReport) -> str:
++    """Render a revenue report as CSV with a trailing ``TOTAL`` row."""
++    buffer = io.StringIO()
++    writer = csv.writer(buffer, lineterminator="\n")
++    writer.writerow(["category", "reservations", "revenue"])
++    for row in report.rows:
++        writer.writerow([row.category, row.reservations, f"{row.revenue:.2f}"])
++    total_count = sum(row.reservations for row in report.rows)
++    writer.writerow(["TOTAL", total_count, f"{report.total:.2f}"])
++    return buffer.getvalue()
++
++
+ def _reserved_days(store: Store, item_id: int, start: date, end: date) -> int:
+     days = 0
+     for reservation in store.reservations.for_item(item_id):

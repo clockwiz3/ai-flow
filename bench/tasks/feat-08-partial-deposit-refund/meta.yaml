@@ -1,0 +1,6 @@
+id: feat-08-partial-deposit-refund
+title: Partial deposit refunds for minor damage
+kind: feature
+difficulty: medium
+expected: escalate
+tags: [ambiguous, returns]

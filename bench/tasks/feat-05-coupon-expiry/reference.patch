@@ -1,0 +1,63 @@
+diff --git a/app/models.py b/app/models.py
+index 9c82ce8..526bf55 100644
+--- a/app/models.py
++++ b/app/models.py
+@@ -108,6 +108,9 @@ class Customer(CustomerCreate):
+ class CouponCreate(DomainModel):
+     code: str = Field(min_length=3, max_length=20)
+     percent: int = Field(ge=1, le=100, description="Percent off the rental subtotal.")
++    expires_on: date | None = Field(
++        default=None, description="Last day the coupon can be used (inclusive); none = never."
++    )
+ 
+     @field_validator("code")
+     @classmethod
+@@ -119,7 +122,9 @@ class CouponCreate(DomainModel):
+ 
+ 
+ class Coupon(CouponCreate):
+-    pass
++    def is_expired(self, today: date) -> bool:
++        """Whether the coupon can no longer be used on ``today``."""
++        return self.expires_on is not None and today > self.expires_on
+ 
+ 
+ # --- reservations ----------------------------------------------------------------------
+diff --git a/app/services/reservations.py b/app/services/reservations.py
+index 88982f8..daef422 100644
+--- a/app/services/reservations.py
++++ b/app/services/reservations.py
+@@ -60,6 +60,10 @@ def create_reservation(store: Store, clock: Clock, data: ReservationCreate) -> R
+         coupon = lookup_coupon(store, data.coupon_code)
+         if coupon is None:
+             raise InvalidRequestError(f"Unknown coupon code {data.coupon_code!r}")
++        if coupon.is_expired(today):
++            raise InvalidRequestError(
++                f"Coupon {coupon.code!r} expired on {coupon.expires_on.isoformat()}"
++            )
+         coupon_code = coupon.code
+ 
+     ensure_available(store, item, data.start, data.end)
+diff --git a/tests/test_pricing.py b/tests/test_pricing.py
+index 1a2f8f0..14642ca 100644
+--- a/tests/test_pricing.py
++++ b/tests/test_pricing.py
+@@ -50,15 +50,15 @@ def test_coupon_for_regular_customer() -> None:
+ 
+ def test_list_coupons(client: TestClient) -> None:
+     assert client.get("/coupons").json() == [
+-        {"code": "SPRING10", "percent": 10},
+-        {"code": "WELCOME20", "percent": 20},
++        {"code": "SPRING10", "percent": 10, "expires_on": None},
++        {"code": "WELCOME20", "percent": 20, "expires_on": None},
+     ]
+ 
+ 
+ def test_create_coupon(client: TestClient) -> None:
+     response = client.post("/coupons", json={"code": "summer5", "percent": 5})
+     assert response.status_code == 201
+-    assert response.json() == {"code": "SUMMER5", "percent": 5}
++    assert response.json() == {"code": "SUMMER5", "percent": 5, "expires_on": None}
+     assert "SUMMER5" in [c["code"] for c in client.get("/coupons").json()]
+ 
+ 

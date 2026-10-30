@@ -1,0 +1,6 @@
+id: feat-02-maintenance-windows
+title: Scheduled maintenance windows for items
+kind: feature
+difficulty: hard
+expected: solve
+tags: [availability, reservations, api]

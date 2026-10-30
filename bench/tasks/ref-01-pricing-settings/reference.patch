@@ -1,0 +1,205 @@
+diff --git a/README.md b/README.md
+index 1b28a59..cc5fc16 100644
+--- a/README.md
++++ b/README.md
+@@ -27,6 +27,7 @@ freshly seeded `Store` and the system clock; tests inject a `FixedClock` pinned
+ | `app/seed.py` | Demo data |
+ | `app/clock.py` | Injectable "today" |
+ | `app/errors.py` | Domain exceptions -> HTTP errors |
++| `app/settings.py` | Pricing and booking rule parameters (`PricingSettings`, `PRICING`) |
+ | `app/services/` | Business rules (catalog, customers, availability, pricing, reservations, returns, invoices, reports) |
+ | `app/api/routes.py` | All HTTP routes |
+ 
+diff --git a/app/services/invoices.py b/app/services/invoices.py
+index 54ce50d..a9aa647 100644
+--- a/app/services/invoices.py
++++ b/app/services/invoices.py
+@@ -6,11 +6,12 @@ rental line only; tax is charged on the discounted subtotal.
+ 
+ from decimal import Decimal
+ 
++from app import settings
+ from app.errors import ConflictError
+ from app.models import Invoice, InvoiceLine, InvoiceLineKind, Reservation, ReservationStatus
+ from app.services.catalog import get_item
+ from app.services.customers import get_customer
+-from app.services.pricing import TAX_RATE, ZERO, lookup_coupon, money, quote_rental
++from app.services.pricing import ZERO, lookup_coupon, money, quote_rental
+ from app.services.reservations import get_reservation
+ from app.services.returns import late_days, late_fee, late_rate
+ from app.storage import Store
+@@ -56,7 +57,7 @@ def compute_invoice(store: Store, reservation: Reservation) -> Invoice:
+ 
+     tier_discount = money(quote.rental_amount * quote.discounts.tier_rate)
+     taxable = subtotal - tier_discount
+-    tax = money(taxable * TAX_RATE)
++    tax = money(taxable * settings.PRICING.tax_rate)
+     coupon_discount = money((taxable + tax) * quote.discounts.coupon_rate)
+ 
+     return Invoice(
+diff --git a/app/services/pricing.py b/app/services/pricing.py
+index bf2baf1..3badf6d 100644
+--- a/app/services/pricing.py
++++ b/app/services/pricing.py
+@@ -4,21 +4,13 @@ from dataclasses import dataclass
+ from datetime import date
+ from decimal import ROUND_HALF_UP, Decimal
+ 
++from app import settings
+ from app.errors import ConflictError, NotFoundError
+ from app.models import Coupon, CouponCreate, Customer, CustomerTier, Item
+ from app.storage import Store
+ 
+ CENT = Decimal("0.01")
+ ZERO = Decimal("0")
+-TAX_RATE = Decimal("0.20")
+-MAX_TOTAL_DISCOUNT = Decimal("0.30")
+-FREE_DAY_EVERY = 7
+-
+-TIER_DISCOUNTS: dict[CustomerTier, Decimal] = {
+-    CustomerTier.REGULAR: Decimal("0"),
+-    CustomerTier.SILVER: Decimal("0.05"),
+-    CustomerTier.GOLD: Decimal("0.15"),
+-}
+ 
+ 
+ def money(value: Decimal) -> Decimal:
+@@ -32,8 +24,8 @@ def rental_days(start: date, end: date) -> int:
+ 
+ 
+ def free_days(days: int) -> int:
+-    """One free day for every full ``FREE_DAY_EVERY`` days."""
+-    return days // FREE_DAY_EVERY
++    """One free day for every full ``free_day_every`` days."""
++    return days // settings.PRICING.free_day_every
+ 
+ 
+ def billable_days(days: int) -> int:
+@@ -55,11 +47,12 @@ class DiscountBreakdown:
+ def resolve_discounts(tier: CustomerTier, coupon: Coupon | None = None) -> DiscountBreakdown:
+     """Combine the customer's tier discount with an optional coupon.
+ 
+-    Discounts are additive and the combined rate is capped at ``MAX_TOTAL_DISCOUNT``.
++    Discounts are additive and the combined rate is capped at ``max_total_discount``.
+     """
+-    tier_rate = TIER_DISCOUNTS[tier]
++    pricing = settings.PRICING
++    tier_rate = pricing.tier_discounts[tier]
+     coupon_rate = Decimal(coupon.percent) / 100 if coupon is not None else ZERO
+-    coupon_rate = min(coupon_rate, MAX_TOTAL_DISCOUNT)
++    coupon_rate = min(coupon_rate, pricing.max_total_discount)
+     return DiscountBreakdown(tier_rate=tier_rate, coupon_rate=coupon_rate)
+ 
+ 
+diff --git a/app/services/reservations.py b/app/services/reservations.py
+index 88982f8..bb67f44 100644
+--- a/app/services/reservations.py
++++ b/app/services/reservations.py
+@@ -1,5 +1,6 @@
+ """Reservation lifecycle: create, look up, cancel."""
+ 
++from app import settings
+ from app.clock import Clock
+ from app.errors import ConflictError, InvalidRequestError, NotFoundError
+ from app.models import Reservation, ReservationCreate, ReservationStatus
+@@ -9,8 +10,6 @@ from app.services.customers import get_customer
+ from app.services.pricing import lookup_coupon
+ from app.storage import Store
+ 
+-MAX_RENTAL_DAYS = 90
+-
+ 
+ def get_reservation(store: Store, reservation_id: int) -> Reservation:
+     reservation = store.reservations.get(reservation_id)
+@@ -41,7 +40,7 @@ def create_reservation(store: Store, clock: Clock, data: ReservationCreate) -> R
+     """Book an item for a customer.
+ 
+     Rules: the range must be non-empty, start today or later and be at most
+-    ``MAX_RENTAL_DAYS`` long; item and customer must exist; a coupon code, if given, must
++    ``PRICING.max_rental_days`` long; item and customer must exist; a coupon code, if given, must
+     exist; the item must be available (not in maintenance / retired, no overlapping active
+     reservation).
+     """
+@@ -49,8 +48,9 @@ def create_reservation(store: Store, clock: Clock, data: ReservationCreate) -> R
+     today = clock.today()
+     if data.start < today:
+         raise InvalidRequestError("Reservations cannot start in the past")
+-    if (data.end - data.start).days > MAX_RENTAL_DAYS:
+-        raise InvalidRequestError(f"Reservations are limited to {MAX_RENTAL_DAYS} days")
++    max_days = settings.PRICING.max_rental_days
++    if (data.end - data.start).days > max_days:
++        raise InvalidRequestError(f"Reservations are limited to {max_days} days")
+ 
+     item = get_item(store, data.item_id)
+     customer = get_customer(store, data.customer_id)
+diff --git a/app/services/returns.py b/app/services/returns.py
+index d4cdcba..88ad889 100644
+--- a/app/services/returns.py
++++ b/app/services/returns.py
+@@ -3,6 +3,7 @@
+ from datetime import date, timedelta
+ from decimal import Decimal
+ 
++from app import settings
+ from app.clock import Clock
+ from app.errors import ConflictError, InvalidRequestError
+ from app.models import ItemStatus, ReservationStatus, ReturnReceipt, ReturnRequest
+@@ -11,8 +12,6 @@ from app.services.pricing import ZERO, money
+ from app.services.reservations import get_reservation
+ from app.storage import Store
+ 
+-LATE_FEE_MULTIPLIER = Decimal("1.5")
+-
+ 
+ def late_days(end: date, returned_on: date) -> int:
+     """Number of chargeable late days for an item due back on ``end``.
+@@ -25,7 +24,7 @@ def late_days(end: date, returned_on: date) -> int:
+ 
+ def late_rate(daily_rate: Decimal) -> Decimal:
+     """Price of one late day."""
+-    return daily_rate * LATE_FEE_MULTIPLIER
++    return daily_rate * settings.PRICING.late_fee_multiplier
+ 
+ 
+ def late_fee(daily_rate: Decimal, days_late: int) -> Decimal:
+diff --git a/app/settings.py b/app/settings.py
+new file mode 100644
+index 0000000..89c61a3
+--- /dev/null
++++ b/app/settings.py
+@@ -0,0 +1,35 @@
++"""Business settings: every pricing and booking rule parameter in one place.
++
++Services read ``app.settings.PRICING`` at call time (``settings.PRICING.tax_rate``), never a
++copy taken at import time, so the active settings can be swapped by rebinding
++``app.settings.PRICING`` (e.g. ``dataclasses.replace(PRICING, tax_rate=...)``).
++"""
++
++from collections.abc import Mapping
++from dataclasses import dataclass, field
++from decimal import Decimal
++
++from app.models import CustomerTier
++
++
++def _default_tier_discounts() -> dict[CustomerTier, Decimal]:
++    return {
++        CustomerTier.REGULAR: Decimal("0"),
++        CustomerTier.SILVER: Decimal("0.05"),
++        CustomerTier.GOLD: Decimal("0.15"),
++    }
++
++
++@dataclass(frozen=True)
++class PricingSettings:
++    """Pricing and booking rule parameters. Rates are fractions (``0.20`` = 20%)."""
++
++    tax_rate: Decimal = Decimal("0.20")
++    tier_discounts: Mapping[CustomerTier, Decimal] = field(default_factory=_default_tier_discounts)
++    max_total_discount: Decimal = Decimal("0.30")
++    free_day_every: int = 7
++    late_fee_multiplier: Decimal = Decimal("1.5")
++    max_rental_days: int = 90
++
++
++PRICING = PricingSettings()

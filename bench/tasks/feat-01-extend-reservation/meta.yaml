@@ -1,0 +1,6 @@
+id: feat-01-extend-reservation
+title: Let customers extend an active reservation
+kind: feature
+difficulty: medium
+expected: solve
+tags: [reservations, api]

@@ -1,0 +1,201 @@
+diff --git a/app/api/routes.py b/app/api/routes.py
+index 10638d4..6d6748f 100644
+--- a/app/api/routes.py
++++ b/app/api/routes.py
+@@ -23,6 +23,8 @@ from app.models import (
+     ItemCreate,
+     ItemPage,
+     ItemStatusUpdate,
++    MaintenanceWindow,
++    MaintenanceWindowCreate,
+     Reservation,
+     ReservationCreate,
+     ReservationStatus,
+@@ -36,6 +38,7 @@ from app.services import (
+     catalog,
+     customers,
+     invoices,
++    maintenance,
+     pricing,
+     reports,
+     reservations,
+@@ -100,6 +103,25 @@ def set_item_status(store: StoreDep, item_id: int, data: ItemStatusUpdate) -> It
+     return catalog.set_item_status(store, item_id, data.status)
+ 
+ 
++@router.get(
++    "/items/{item_id}/maintenance", response_model=list[MaintenanceWindow], tags=["catalog"]
++)
++def list_maintenance(store: StoreDep, item_id: int) -> list[MaintenanceWindow]:
++    return maintenance.list_windows(store, item_id)
++
++
++@router.post(
++    "/items/{item_id}/maintenance",
++    response_model=MaintenanceWindow,
++    status_code=status.HTTP_201_CREATED,
++    tags=["catalog"],
++)
++def schedule_maintenance(
++    store: StoreDep, item_id: int, data: MaintenanceWindowCreate
++) -> MaintenanceWindow:
++    return maintenance.schedule_window(store, item_id, data)
++
++
+ # --- customers -------------------------------------------------------------------------
+ 
+ 
+diff --git a/app/models.py b/app/models.py
+index 9c82ce8..04b9d93 100644
+--- a/app/models.py
++++ b/app/models.py
+@@ -77,6 +77,16 @@ class ItemStatusUpdate(DomainModel):
+     status: ItemStatus
+ 
+ 
++class MaintenanceWindowCreate(DomainModel):
++    start: date
++    end: date = Field(description="Exclusive: the item is back in service on this date.")
++
++
++class MaintenanceWindow(MaintenanceWindowCreate):
++    id: int
++    item_id: int
++
++
+ class ItemPage(DomainModel):
+     items: list[Item]
+     total: int
+diff --git a/app/services/availability.py b/app/services/availability.py
+index 6387154..f92a972 100644
+--- a/app/services/availability.py
++++ b/app/services/availability.py
+@@ -7,7 +7,14 @@ morning of ``end`` and can be handed out again that same day.
+ from datetime import date
+ 
+ from app.errors import ConflictError, InvalidRequestError
+-from app.models import Availability, Item, ItemStatus, Reservation, ReservationStatus
++from app.models import (
++    Availability,
++    Item,
++    ItemStatus,
++    MaintenanceWindow,
++    Reservation,
++    ReservationStatus,
++)
+ from app.services.catalog import get_item
+ from app.storage import Store
+ 
+@@ -45,6 +52,20 @@ def find_conflicts(
+     return conflicts
+ 
+ 
++MAINTENANCE_WINDOW_REASON = "Item is scheduled for maintenance during this period"
++
++
++def maintenance_windows_in(
++    store: Store, item_id: int, start: date, end: date
++) -> list[MaintenanceWindow]:
++    """Scheduled maintenance windows of ``item_id`` sharing at least one day with the range."""
++    return [
++        window
++        for window in store.maintenance.for_item(item_id)
++        if window.start < end and start < window.end
++    ]
++
++
+ def _unavailable_reason(item: Item) -> str | None:
+     if item.status is ItemStatus.MAINTENANCE:
+         return "Item is under maintenance"
+@@ -59,6 +80,8 @@ def check_availability(store: Store, item_id: int, start: date, end: date) -> Av
+     item = get_item(store, item_id)
+ 
+     reason = _unavailable_reason(item)
++    if reason is None and maintenance_windows_in(store, item_id, start, end):
++        reason = MAINTENANCE_WINDOW_REASON
+     conflicts = find_conflicts(store, item_id, start, end)
+     if reason is None and conflicts:
+         reason = "Item is already reserved for part of this period"
+@@ -78,6 +101,9 @@ def ensure_available(store: Store, item: Item, start: date, end: date) -> None:
+     reason = _unavailable_reason(item)
+     if reason is not None:
+         raise ConflictError(f"Item {item.id} cannot be reserved: {reason.lower()}")
++    if maintenance_windows_in(store, item.id, start, end):
++        reason = MAINTENANCE_WINDOW_REASON.lower()
++        raise ConflictError(f"Item {item.id} cannot be reserved: {reason}")
+     conflicts = find_conflicts(store, item.id, start, end)
+     if conflicts:
+         ids = ", ".join(str(r.id) for r in conflicts)
+diff --git a/app/services/maintenance.py b/app/services/maintenance.py
+new file mode 100644
+index 0000000..02acd8e
+--- /dev/null
++++ b/app/services/maintenance.py
+@@ -0,0 +1,35 @@
++"""Scheduled maintenance windows: periods during which an item cannot be rented."""
++
++from app.errors import ConflictError
++from app.models import MaintenanceWindow, MaintenanceWindowCreate, ReservationStatus
++from app.services.availability import validate_range
++from app.services.catalog import get_item
++from app.storage import Store
++
++
++def list_windows(store: Store, item_id: int) -> list[MaintenanceWindow]:
++    """Maintenance windows of an item ordered by start date (then id)."""
++    get_item(store, item_id)
++    return sorted(store.maintenance.for_item(item_id), key=lambda w: (w.start, w.id))
++
++
++def schedule_window(
++    store: Store, item_id: int, data: MaintenanceWindowCreate
++) -> MaintenanceWindow:
++    """Schedule maintenance for ``[start, end)``; it may not overlap an active reservation."""
++    validate_range(data.start, data.end)
++    item = get_item(store, item_id)
++    clashes = [
++        r
++        for r in store.reservations.for_item(item.id)
++        if r.status is ReservationStatus.ACTIVE and r.start < data.end and data.start < r.end
++    ]
++    if clashes:
++        ids = ", ".join(str(r.id) for r in clashes)
++        raise ConflictError(
++            f"Maintenance overlaps active reservations of item {item.id} (reservations: {ids})"
++        )
++    window = MaintenanceWindow(
++        id=store.maintenance.allocate_id(), item_id=item.id, start=data.start, end=data.end
++    )
++    return store.maintenance.insert(window)
+diff --git a/app/storage.py b/app/storage.py
+index 3751a24..513b018 100644
+--- a/app/storage.py
++++ b/app/storage.py
+@@ -16,6 +16,7 @@ from app.models import (
+     CustomerCreate,
+     Item,
+     ItemCreate,
++    MaintenanceWindow,
+     Reservation,
+ )
+ 
+@@ -107,6 +108,11 @@ class ReservationRepository(IntIdRepository[Reservation]):
+         return [r for r in self.all() if r.customer_id == customer_id]
+ 
+ 
++class MaintenanceRepository(IntIdRepository[MaintenanceWindow]):
++    def for_item(self, item_id: int) -> list[MaintenanceWindow]:
++        return [w for w in self.all() if w.item_id == item_id]
++
++
+ class CouponRepository(InMemoryRepository[str, Coupon]):
+     def _key(self, entity: Coupon) -> str:
+         return entity.code
+@@ -127,6 +133,7 @@ class Store:
+     customers: CustomerRepository = field(default_factory=CustomerRepository)
+     reservations: ReservationRepository = field(default_factory=ReservationRepository)
+     coupons: CouponRepository = field(default_factory=CouponRepository)
++    maintenance: MaintenanceRepository = field(default_factory=MaintenanceRepository)
+ 
+     @classmethod
+     def seeded(cls) -> "Store":

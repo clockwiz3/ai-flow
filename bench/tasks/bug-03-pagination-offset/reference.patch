@@ -1,0 +1,13 @@
+diff --git a/app/services/catalog.py b/app/services/catalog.py
+index 7796bdf..8368b64 100644
+--- a/app/services/catalog.py
++++ b/app/services/catalog.py
+@@ -55,7 +55,7 @@ def list_items(
+ 
+     matching = [item for item in store.items.all() if _matches(item, q, category)]
+     return ItemPage(
+-        items=matching[offset:limit],
++        items=matching[offset : offset + limit],
+         total=len(matching),
+         limit=limit,
+         offset=offset,

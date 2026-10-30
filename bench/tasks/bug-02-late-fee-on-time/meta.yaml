@@ -1,0 +1,6 @@
+id: bug-02-late-fee-on-time
+title: On-time returns are charged a late fee
+kind: bug
+difficulty: easy
+expected: solve
+tags: [returns, invoices, dates]

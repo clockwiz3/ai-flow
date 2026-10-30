@@ -1,0 +1,13 @@
+diff --git a/app/services/catalog.py b/app/services/catalog.py
+index ddffb25..693fd34 100644
+--- a/app/services/catalog.py
++++ b/app/services/catalog.py
+@@ -41,7 +41,7 @@ def _matches(item: Item, q: str | None, category: str | None) -> bool:
+     if category is not None and item.category != category:
+         return False
+     if q:
+-        return q.strip() in item.name
++        return q.strip().casefold() in item.name.casefold()
+     return True
+ 
+ 

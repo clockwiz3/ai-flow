@@ -1,0 +1,6 @@
+id: feat-05-coupon-expiry
+title: Coupons with an expiry date
+kind: feature
+difficulty: medium
+expected: solve
+tags: [pricing, coupons, api]

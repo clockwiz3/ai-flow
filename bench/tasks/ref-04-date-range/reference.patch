@@ -1,0 +1,234 @@
+diff --git a/README.md b/README.md
+index 1b28a59..9e7096d 100644
+--- a/README.md
++++ b/README.md
+@@ -23,6 +23,7 @@ freshly seeded `Store` and the system clock; tests inject a `FixedClock` pinned
+ | Path | Purpose |
+ | --- | --- |
+ | `app/models.py` | Pydantic models and enums |
++| `app/daterange.py` | `DateRange`: half-open `[start, end)` date range value object |
+ | `app/storage.py` | In-memory repositories, `Store`, seed loader |
+ | `app/seed.py` | Demo data |
+ | `app/clock.py` | Injectable "today" |
+diff --git a/app/daterange.py b/app/daterange.py
+new file mode 100644
+index 0000000..c878d32
+--- /dev/null
++++ b/app/daterange.py
+@@ -0,0 +1,36 @@
++"""Half-open date ranges ``[start, end)``.
++
++``end`` is exclusive: a reservation ``[2025-06-10, 2025-06-15)`` covers five days and the item
++is back on the morning of the 15th, so a range ending on a day and another starting on that
++same day do not overlap.
++"""
++
++from dataclasses import dataclass
++from datetime import date
++
++
++@dataclass(frozen=True)
++class DateRange:
++    start: date
++    end: date
++
++    def __post_init__(self) -> None:
++        if not self.start < self.end:
++            raise ValueError(f"empty date range: end {self.end} is not after start {self.start}")
++
++    @property
++    def days(self) -> int:
++        """Number of days in the range."""
++        return (self.end - self.start).days
++
++    def contains(self, day: date) -> bool:
++        """Whether ``day`` falls in ``[start, end)``."""
++        return self.start <= day < self.end
++
++    def overlaps(self, other: "DateRange") -> bool:
++        """Whether the two ranges share at least one day."""
++        return self.start < other.end and other.start < self.end
++
++    def overlap_days(self, other: "DateRange") -> int:
++        """Number of days the two ranges share (0 when they do not overlap)."""
++        return max(0, (min(self.end, other.end) - max(self.start, other.start)).days)
+diff --git a/app/models.py b/app/models.py
+index 9c82ce8..6e1a216 100644
+--- a/app/models.py
++++ b/app/models.py
+@@ -10,6 +10,8 @@ from typing import Annotated
+ 
+ from pydantic import BaseModel, ConfigDict, Field, field_validator
+ 
++from app.daterange import DateRange
++
+ Money = Annotated[Decimal, Field(ge=0, max_digits=12, decimal_places=2)]
+ PositiveMoney = Annotated[Decimal, Field(gt=0, max_digits=12, decimal_places=2)]
+ 
+@@ -145,10 +147,15 @@ class Reservation(DomainModel):
+     returned_on: date | None = None
+     damaged: bool = False
+ 
++    @property
++    def period(self) -> DateRange:
++        """The reserved range ``[start, end)``."""
++        return DateRange(self.start, self.end)
++
+     @property
+     def days(self) -> int:
+         """Number of rental days (``end`` is exclusive)."""
+-        return (self.end - self.start).days
++        return self.period.days
+ 
+ 
+ class ReturnRequest(DomainModel):
+diff --git a/app/services/availability.py b/app/services/availability.py
+index 6387154..1b98047 100644
+--- a/app/services/availability.py
++++ b/app/services/availability.py
+@@ -6,23 +6,19 @@ morning of ``end`` and can be handed out again that same day.
+ 
+ from datetime import date
+ 
++from app.daterange import DateRange
+ from app.errors import ConflictError, InvalidRequestError
+ from app.models import Availability, Item, ItemStatus, Reservation, ReservationStatus
+ from app.services.catalog import get_item
+ from app.storage import Store
+ 
+ 
+-def validate_range(start: date, end: date) -> None:
+-    """Reject empty or inverted date ranges."""
+-    if end <= start:
+-        raise InvalidRequestError("end must be after start")
+-
+-
+-def _overlaps(existing: Reservation, start: date, end: date) -> bool:
+-    """Whether ``[start, end)`` collides with the existing reservation's range."""
+-    starts_inside = existing.start <= start < existing.end
+-    ends_inside = existing.start < end <= existing.end
+-    return starts_inside or ends_inside
++def validate_range(start: date, end: date) -> DateRange:
++    """The range ``[start, end)``; empty or inverted ranges are rejected."""
++    try:
++        return DateRange(start, end)
++    except ValueError:
++        raise InvalidRequestError("end must be after start") from None
+ 
+ 
+ def find_conflicts(
+@@ -34,13 +30,14 @@ def find_conflicts(
+     exclude_id: int | None = None,
+ ) -> list[Reservation]:
+     """Reservations of ``item_id`` that block the range ``[start, end)``."""
++    requested = DateRange(start, end)
+     conflicts: list[Reservation] = []
+     for reservation in store.reservations.for_item(item_id):
+         if reservation.id == exclude_id:
+             continue
+         if reservation.status is ReservationStatus.RETURNED:
+             continue
+-        if _overlaps(reservation, start, end):
++        if reservation.period.overlaps(requested):
+             conflicts.append(reservation)
+     return conflicts
+ 
+diff --git a/app/services/pricing.py b/app/services/pricing.py
+index bf2baf1..b43145c 100644
+--- a/app/services/pricing.py
++++ b/app/services/pricing.py
+@@ -4,6 +4,7 @@ from dataclasses import dataclass
+ from datetime import date
+ from decimal import ROUND_HALF_UP, Decimal
+ 
++from app.daterange import DateRange
+ from app.errors import ConflictError, NotFoundError
+ from app.models import Coupon, CouponCreate, Customer, CustomerTier, Item
+ from app.storage import Store
+@@ -28,7 +29,7 @@ def money(value: Decimal) -> Decimal:
+ 
+ def rental_days(start: date, end: date) -> int:
+     """Number of rental days in ``[start, end)``."""
+-    return (end - start).days
++    return DateRange(start, end).days
+ 
+ 
+ def free_days(days: int) -> int:
+diff --git a/app/services/reports.py b/app/services/reports.py
+index 0833af7..22b9bca 100644
+--- a/app/services/reports.py
++++ b/app/services/reports.py
+@@ -4,6 +4,7 @@ from collections import defaultdict
+ from datetime import date
+ from decimal import ROUND_HALF_UP, Decimal
+ 
++from app.daterange import DateRange
+ from app.models import (
+     CategoryRevenue,
+     ItemStatus,
+@@ -26,12 +27,12 @@ def revenue_report(store: Store, start: date, end: date) -> RevenueReport:
+     A reservation counts towards the period ``[start, end)`` when its start date falls in
+     it. Cancelled reservations bring no revenue.
+     """
+-    validate_range(start, end)
++    period = validate_range(start, end)
+     revenue: dict[str, Decimal] = defaultdict(lambda: ZERO)
+     counts: dict[str, int] = defaultdict(int)
+ 
+     for reservation in store.reservations.all():
+-        if not start <= reservation.start < end:
++        if not period.contains(reservation.start):
+             continue
+         item = store.items.get(reservation.item_id)
+         if item is None:
+@@ -56,13 +57,12 @@ def revenue_report(store: Store, start: date, end: date) -> RevenueReport:
+     )
+ 
+ 
+-def _reserved_days(store: Store, item_id: int, start: date, end: date) -> int:
++def _reserved_days(store: Store, item_id: int, period: DateRange) -> int:
+     days = 0
+     for reservation in store.reservations.for_item(item_id):
+         if reservation.status is ReservationStatus.CANCELLED:
+             continue
+-        overlap = (min(reservation.end, end) - max(reservation.start, start)).days
+-        days += max(0, overlap)
++        days += reservation.period.overlap_days(period)
+     return days
+ 
+ 
+@@ -71,13 +71,13 @@ def utilization_report(store: Store, start: date, end: date) -> UtilizationRepor
+ 
+     Active and returned reservations count; cancelled ones do not.
+     """
+-    validate_range(start, end)
+-    period_days = (end - start).days
++    period = validate_range(start, end)
++    period_days = period.days
+     rows: list[ItemUtilization] = []
+     for item in store.items.all():
+         if item.status is ItemStatus.RETIRED:
+             continue
+-        reserved = _reserved_days(store, item.id, start, end)
++        reserved = _reserved_days(store, item.id, period)
+         pct = (Decimal(reserved) * 100 / period_days).quantize(PERCENT_STEP, rounding=ROUND_HALF_UP)
+         rows.append(
+             ItemUtilization(
+diff --git a/app/services/reservations.py b/app/services/reservations.py
+index 88982f8..0766a3e 100644
+--- a/app/services/reservations.py
++++ b/app/services/reservations.py
+@@ -45,11 +45,11 @@ def create_reservation(store: Store, clock: Clock, data: ReservationCreate) -> R
+     exist; the item must be available (not in maintenance / retired, no overlapping active
+     reservation).
+     """
+-    validate_range(data.start, data.end)
++    period = validate_range(data.start, data.end)
+     today = clock.today()
+     if data.start < today:
+         raise InvalidRequestError("Reservations cannot start in the past")
+-    if (data.end - data.start).days > MAX_RENTAL_DAYS:
++    if period.days > MAX_RENTAL_DAYS:
+         raise InvalidRequestError(f"Reservations are limited to {MAX_RENTAL_DAYS} days")
+ 
+     item = get_item(store, data.item_id)

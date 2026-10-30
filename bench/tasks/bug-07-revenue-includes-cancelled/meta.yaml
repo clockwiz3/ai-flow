@@ -1,0 +1,6 @@
+id: bug-07-revenue-includes-cancelled
+title: Revenue report counts cancelled reservations
+kind: bug
+difficulty: medium
+expected: solve
+tags: [reports]

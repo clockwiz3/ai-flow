@@ -1,0 +1,95 @@
+diff --git a/app/api/routes.py b/app/api/routes.py
+index 10638d4..2c813a4 100644
+--- a/app/api/routes.py
++++ b/app/api/routes.py
+@@ -25,6 +25,7 @@ from app.models import (
+     ItemStatusUpdate,
+     Reservation,
+     ReservationCreate,
++    ReservationExtend,
+     ReservationStatus,
+     ReturnReceipt,
+     ReturnRequest,
+@@ -185,6 +186,17 @@ def cancel_reservation(store: StoreDep, reservation_id: int) -> Reservation:
+     return reservations.cancel_reservation(store, reservation_id)
+ 
+ 
++@router.post(
++    "/reservations/{reservation_id}/extend",
++    response_model=Reservation,
++    tags=["reservations"],
++)
++def extend_reservation(
++    store: StoreDep, reservation_id: int, data: ReservationExtend
++) -> Reservation:
++    return reservations.extend_reservation(store, reservation_id, data)
++
++
+ @router.post(
+     "/reservations/{reservation_id}/return",
+     response_model=ReturnReceipt,
+diff --git a/app/models.py b/app/models.py
+index 9c82ce8..4f97a54 100644
+--- a/app/models.py
++++ b/app/models.py
+@@ -151,6 +151,10 @@ class Reservation(DomainModel):
+         return (self.end - self.start).days
+ 
+ 
++class ReservationExtend(DomainModel):
++    end: date = Field(description="New exclusive end date; must be after the current end.")
++
++
+ class ReturnRequest(DomainModel):
+     returned_on: date | None = Field(default=None, description="Defaults to today when omitted.")
+     damaged: bool = False
+diff --git a/app/services/reservations.py b/app/services/reservations.py
+index 88982f8..cc2a630 100644
+--- a/app/services/reservations.py
++++ b/app/services/reservations.py
+@@ -2,7 +2,7 @@
+ 
+ from app.clock import Clock
+ from app.errors import ConflictError, InvalidRequestError, NotFoundError
+-from app.models import Reservation, ReservationCreate, ReservationStatus
++from app.models import Reservation, ReservationCreate, ReservationExtend, ReservationStatus
+ from app.services.availability import ensure_available, validate_range
+ from app.services.catalog import get_item
+ from app.services.customers import get_customer
+@@ -85,3 +85,36 @@ def cancel_reservation(store: Store, reservation_id: int) -> Reservation:
+         )
+     cancelled = reservation.model_copy(update={"status": ReservationStatus.CANCELLED})
+     return store.reservations.save(cancelled)
++
++
++def extend_reservation(store: Store, reservation_id: int, data: ReservationExtend) -> Reservation:
++    """Move the end of an active reservation later.
++
++    The new end must be after the current one, the whole reservation must still respect
++    ``MAX_RENTAL_DAYS`` and the added days ``[current end, new end)`` must not collide with
++    another active reservation of the same item.
++    """
++    reservation = get_reservation(store, reservation_id)
++    if reservation.status is not ReservationStatus.ACTIVE:
++        raise ConflictError(
++            f"Reservation {reservation_id} is {reservation.status.value} and cannot be extended"
++        )
++    if data.end <= reservation.end:
++        raise InvalidRequestError("The new end must be after the current end")
++    if (data.end - reservation.start).days > MAX_RENTAL_DAYS:
++        raise InvalidRequestError(f"Reservations are limited to {MAX_RENTAL_DAYS} days")
++
++    conflicts = [
++        other
++        for other in store.reservations.for_item(reservation.item_id)
++        if other.id != reservation.id
++        and other.status is ReservationStatus.ACTIVE
++        and other.start < data.end
++        and reservation.end < other.end
++    ]
++    if conflicts:
++        ids = ", ".join(str(r.id) for r in conflicts)
++        raise ConflictError(
++            f"Item {reservation.item_id} is already reserved (reservations: {ids})"
++        )
++    return store.reservations.save(reservation.model_copy(update={"end": data.end}))

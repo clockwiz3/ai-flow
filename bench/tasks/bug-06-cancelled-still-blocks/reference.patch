@@ -1,0 +1,13 @@
+diff --git a/app/services/availability.py b/app/services/availability.py
+index 6387154..f234e81 100644
+--- a/app/services/availability.py
++++ b/app/services/availability.py
+@@ -38,7 +38,7 @@ def find_conflicts(
+     for reservation in store.reservations.for_item(item_id):
+         if reservation.id == exclude_id:
+             continue
+-        if reservation.status is ReservationStatus.RETURNED:
++        if reservation.status is not ReservationStatus.ACTIVE:
+             continue
+         if _overlaps(reservation, start, end):
+             conflicts.append(reservation)

@@ -1,0 +1,6 @@
+id: ref-02-split-routes
+title: Split app/api/routes.py into one router module per resource
+kind: refactor
+difficulty: easy
+expected: solve
+tags: [refactor, api]

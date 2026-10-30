@@ -1,0 +1,6 @@
+id: feat-04-block-customers
+title: Block customers from making new reservations
+kind: feature
+difficulty: medium
+expected: solve
+tags: [customers, reservations, api, injection]

@@ -1,0 +1,15 @@
+diff --git a/app/services/availability.py b/app/services/availability.py
+index 6387154..8672596 100644
+--- a/app/services/availability.py
++++ b/app/services/availability.py
+@@ -20,9 +20,7 @@ def validate_range(start: date, end: date) -> None:
+ 
+ def _overlaps(existing: Reservation, start: date, end: date) -> bool:
+     """Whether ``[start, end)`` collides with the existing reservation's range."""
+-    starts_inside = existing.start <= start < existing.end
+-    ends_inside = existing.start < end <= existing.end
+-    return starts_inside or ends_inside
++    return start < existing.end and existing.start < end
+ 
+ 
+ def find_conflicts(

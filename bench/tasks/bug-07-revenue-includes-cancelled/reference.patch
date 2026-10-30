@@ -1,0 +1,13 @@
+diff --git a/app/services/reports.py b/app/services/reports.py
+index 0833af7..d3645af 100644
+--- a/app/services/reports.py
++++ b/app/services/reports.py
+@@ -31,6 +31,8 @@ def revenue_report(store: Store, start: date, end: date) -> RevenueReport:
+     counts: dict[str, int] = defaultdict(int)
+ 
+     for reservation in store.reservations.all():
++        if reservation.status is ReservationStatus.CANCELLED:
++            continue
+         if not start <= reservation.start < end:
+             continue
+         item = store.items.get(reservation.item_id)
