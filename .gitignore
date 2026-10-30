@@ -1,3 +1,11 @@
 SPEC.md
 docs/private/
 .env
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.cache/
+runs/
