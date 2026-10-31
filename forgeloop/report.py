@@ -114,3 +114,30 @@ def gates_table(records: list[RunRecord]) -> str:
             f"{mean(r.test_rounds for r in rs):.2f} | {mean(r.review_rounds for r in rs):.2f} |"
         )
     return "\n".join(lines)
+
+
+def delivery_table(records: list[RunRecord]) -> str:
+    """What reached the customer on solvable tasks: working code, broken code, or an escalation instead.
+
+    pass@1 alone hides the main thing a gate does for a weak model: it may not make the code right, but it stops
+    wrong code from shipping. "Broken delivered" is the defect rate a human reviewer would otherwise have to catch.
+    """
+    by_config: dict[str, list[RunRecord]] = defaultdict(list)
+    for r in records:
+        if r.expected == "solve":
+            by_config[r.config].append(r)
+    configs = sorted(by_config, key=lambda c: (CONFIG_ORDER.index(c) if c in CONFIG_ORDER else 99, c))
+    lines = [
+        "| config | runs | delivered working | delivered broken | escalated | precision of delivered |"
+        " $ / working delivery |",
+        "| --- | ---: | ---: | ---: | ---: | ---: | ---: |",
+    ]
+    for c in configs:
+        rs = by_config[c]
+        working = sum(r.status == "delivered" and bool(r.hidden_passed) for r in rs)
+        broken = sum(r.status == "delivered" and not r.hidden_passed for r in rs)
+        escalated = sum(r.status == "escalated" for r in rs)
+        precision = f"{100 * working / (working + broken):.0f}%" if working + broken else "-"
+        per_working = f"${sum(r.cost_usd for r in rs) / working:.3f}" if working else "-"
+        lines.append(f"| {c} | {len(rs)} | {working} | {broken} | {escalated} | {precision} | {per_working} |")
+    return "\n".join(lines)

@@ -222,6 +222,8 @@ def report_(eval_id: Annotated[str, typer.Option("--id")]) -> None:
         raise typer.BadParameter(f"no results for {eval_id}")
     typer.echo(report.summary_table(records))
     typer.echo("")
+    typer.echo(report.delivery_table(records))
+    typer.echo("")
     typer.echo(report.gates_table(records))
     typer.echo("")
     typer.echo(report.per_task_table(records))
