@@ -1,6 +1,6 @@
 # ForgeLoop
 
-**12 → 0:** with a cheap implementer model, ForgeLoop's gates cut broken deliveries from 12 of 17 tickets to 0. The cost is steep: every change that reaches the customer costs $1.46 instead of $0.017, and most tickets end up escalated rather than fixed. A strong implementer gets nothing extra from them on this bench: 16/17 working changes without gates, 15/17 with them, at 2.3× the price. These numbers come from 160 runs measured with hidden tests, and all experiments together cost $6.12.
+**12 → 0:** with a cheap implementer model, ForgeLoop's gates cut broken deliveries from 12 of 17 tickets to 0. The cost is steep: every change that reaches the customer costs $1.43 instead of $0.017, and most tickets end up escalated rather than fixed. A strong implementer gets nothing extra from them on this bench: 16/17 working changes without gates, 15/17 with them, at 2.5× the price. These numbers come from 160 runs measured with hidden tests, and all experiments together cost $7.45.
 
 ForgeLoop is a hand-written orchestrator for agentic software delivery. It takes a ticket through plan, implementation, gates and a pull request. Its eval measures what each stage actually buys.
 
@@ -70,27 +70,28 @@ This writes `runs/<run_id>/PR.md` ([example](docs/example-PR.md)) and the work b
 | implementer | config | pass@1 | delivered broken | escalated | ambiguous → question | $ per working change |
 | --- | --- | ---: | ---: | ---: | ---: | ---: |
 | claude-haiku-5.5 | baseline (one agent) | 94% | 1 | 0 | 3/3 | $0.022 |
-| | + plan | 88% | 0 | 2 | 3/3 | $0.041 |
-| | + test gate | 88% | 0 | 2 | 3/3 | $0.044 |
-| | full (+ review) | 88% | 0 | 2 | 3/3 | $0.050 |
+| | + plan | 88% | 0 | 2 | 3/3 | $0.042 |
+| | + test gate | 88% | 0 | 2 | 3/3 | $0.051 |
+| | full (+ review) | 88% | 0 | 2 | 3/3 | $0.056 |
 | gemini-2.5-flash-lite | baseline | 29% | 12 | 0 | 1/3 | $0.017 |
-| | + plan | 29% | 11 | 1 | 3/3 | $0.146 |
-| | + test gate | 18% | 3 | 11 | 3/3 | $0.371 |
-| | full | 6% | 0 | 16 | 3/3 | $1.462 |
+| | + plan | 35% | 9 | 2 | 3/3 | $0.130 |
+| | + test gate | 24% | 4 | 9 | 3/3 | $0.231 |
+| | full | 6% | 0 | 16 | 3/3 | $1.434 |
 
 pass@1 and the delivery columns cover the 17 solvable tickets. "Ambiguous → question" covers the 3 ambiguous ones.
 
 | what each gate did (flash-lite, full) | count |
 | --- | ---: |
-| runs rescued by a test-gate fix round | 0 |
+| runs where a test-gate fix round turned failing code into passing code | 1 |
 | runs rescued by a review fix round | 0 |
 | reviewer `request_changes` on code that already passed the hidden tests | 8 of 8 |
 | review "fixes" that broke working code | 1 |
-| working code escalated because of the gates | 4 |
+| working code escalated because of the gates | 5 |
+| escalated because the implementer changed nothing at all | 3 |
 
 What this says:
 
-1. **Gates contain a weak model; they don't improve it.** Every broken change the gates stopped became an escalation, not a fix.
+1. **Gates contain a weak model more than they improve it.** Of all the broken changes the full pipeline stopped, fix rounds repaired one; the rest became escalations.
 2. **Planning pays off on ambiguity.** With a planner, every configuration asked a question on all three ambiguous tickets. A weak model on its own invented business rules.
 3. **The LLM reviewer is the least reliable gate.** The test gate escalated working code twice: the hidden tests passed, but visible tests or lint did not. Every one of the reviewer's 8 `request_changes` verdicts on the weak track targeted code that already worked.
 4. **No run followed an injected instruction.** That held for every model, but the gates were not what stopped it.
@@ -130,7 +131,11 @@ The agents are treated as untrusted code generators. Every restriction is enforc
 
    All five were fixed before the main run. The last fix is a prompt change made after seeing the bench, so it is bench-informed.
 4. **Per-checkpoint implementation didn't help a weak model.** Each checkpoint is a fresh agent that re-reads the code, so flash-lite burned its token budget (27 checkpoint runs hit the limit) without more working results.
-5. **An orchestrator bug is in the numbers.** When a checkpoint's agent hits its step limit, the next checkpoint is still told that earlier checkpoints are done. That sank one hard refactor for the strong model. It is left in the published results.
+5. **An orchestrator bug made it into the first version of the results.**
+   - When a checkpoint's agent stopped on a limit, the next checkpoint still ran and was told that earlier checkpoints were done.
+   - Now an unfinished checkpoint is retried once and escalated if it still fails.
+   - The 27 affected runs were re-run; the replaced records are kept in `evals/results/*.superseded.jsonl`.
+   - The fix changed nothing for the strong model and moved the weak model's plan and test-gate rows by one or two tasks.
 6. **pip-audit can't run in a network-less sandbox.** The dependency check therefore queries OSV directly from the orchestrator and never executes repository code on the host.
 7. **Windows paths.** Deep run directories hit the 260-character limit inside `.git` and silently broke `git` and cleanup. Run ids are now short and cleanup uses extended-length paths.
 8. **Statistics are thin.** There is one repeat per cell (the budget choice), 20 tasks, and difficulty labels assigned by the task authors. Differences of one or two tasks are within noise.
@@ -161,9 +166,9 @@ evals/              results (JSONL) and the report
 
 - Parallel tickets: several runs at once, each with its own worktree and sandbox.
 - A direct Anthropic Messages API provider next to OpenRouter, and an agent-SDK backend for comparison.
-- Escalate a failing checkpoint to a stronger model instead of to a human, and check checkpoint status before moving on.
+- Escalate a checkpoint that fails twice to a stronger model instead of straight to a human.
 - More repeats on the weak-model track, and a harder, larger bench.
 
 ## Cost of all experiments
 
-**$6.12** on OpenRouter, from first smoke test to final eval, demo included. That covers model selection, two benchmark baselines, two trials and the main eval. Every response is cached locally, so all reports regenerate offline for free.
+**$7.45** on OpenRouter, from first smoke test to final eval, demo and the post-fix re-run included. That covers model selection, two benchmark baselines, two trials and the main eval. Every response is cached locally, so all reports regenerate offline for free.

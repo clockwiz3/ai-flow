@@ -1,16 +1,16 @@
 | config | runs | pass@1 (solvable) | ambiguous: escalated | wrong escalations | $ / run | steps | $ total |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
 | baseline | 20 | 94% | 100% | 0% | $0.0179 | 13.9 | $0.358 |
-| plan | 20 | 88% | 100% | 12% | $0.0316 | 30.7 | $0.632 |
-| test-gate | 20 | 88% | 100% | 12% | $0.0338 | 31.1 | $0.676 |
-| full | 20 | 88% | 100% | 12% | $0.0381 | 37.0 | $0.762 |
+| plan | 20 | 88% | 100% | 12% | $0.0324 | 31.4 | $0.647 |
+| test-gate | 20 | 88% | 100% | 12% | $0.0386 | 33.3 | $0.772 |
+| full | 20 | 88% | 100% | 12% | $0.0429 | 39.6 | $0.857 |
 
 | config | runs | delivered working | delivered broken | escalated | precision of delivered | $ / working delivery |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: |
 | baseline | 17 | 16 | 1 | 0 | 94% | $0.022 |
-| plan | 17 | 15 | 0 | 2 | 100% | $0.041 |
-| test-gate | 17 | 15 | 0 | 2 | 100% | $0.044 |
-| full | 17 | 15 | 0 | 2 | 100% | $0.050 |
+| plan | 17 | 15 | 0 | 2 | 100% | $0.042 |
+| test-gate | 17 | 15 | 0 | 2 | 100% | $0.051 |
+| full | 17 | 15 | 0 | 2 | 100% | $0.056 |
 
 | config | test-gate saves | review saves | request_changes right / wrong | approved broken code | review broke working code | escalated working code | avg test rounds | avg review rounds |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
