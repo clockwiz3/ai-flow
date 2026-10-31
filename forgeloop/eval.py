@@ -67,7 +67,7 @@ class RunRecord(BaseModel):
 @dataclass(frozen=True)
 class EvalSettings:
     model: str
-    reviewer_model: str = "deepseek/deepseek-v4.1-flash"
+    reviewer_model: str = "z-ai/glm-5.3-flash"
     planner_model: str | None = None  # defaults to the implementer model
     max_usd_per_run: float = 1.00
     max_usd_per_agent: float = 0.40

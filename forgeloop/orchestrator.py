@@ -52,7 +52,7 @@ class PipelineConfig(BaseModel):
     approve_plan: bool = False
     implementer_model: str = "anthropic/claude-haiku-5.5"
     planner_model: str = "anthropic/claude-haiku-5.5"
-    reviewer_model: str = "deepseek/deepseek-v4.1-flash"  # a different model than the implementer
+    reviewer_model: str = "z-ai/glm-5.3-flash"  # a different model than the implementer
     max_plan_attempts: int = 2
     max_test_rounds: int = 3
     max_review_rounds: int = 2

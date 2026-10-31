@@ -22,7 +22,7 @@ from llmcore import LLMClient, Meter, PriceTable, ResponseCache, Tracer, load_do
 app = typer.Typer(no_args_is_help=True, add_completion=False)
 
 DEFAULT_MODEL = "anthropic/claude-haiku-5.5"
-DEFAULT_REVIEWER = "deepseek/deepseek-v4.1-flash"
+DEFAULT_REVIEWER = "z-ai/glm-5.3-flash"
 RUNS = Path("runs")
 
 
