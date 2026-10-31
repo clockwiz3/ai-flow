@@ -124,6 +124,7 @@ class Orchestrator:
     tracer: Tracer | None = None
     observer: Observer | None = None
     approver: Approver | None = None
+    log: Callable[[str], None] | None = None  # human-readable progress, e.g. for the CLI
     runs_dir: Path = Path("runs")
     sandbox_factory: Callable[[Path], Awaitable[Sandbox]] = field(default=DockerSandbox.start)
 
@@ -376,6 +377,9 @@ class Orchestrator:
             )
         )  # fmt: skip
         self.store.event(state.run_id, state.stage.value, "agent", state.agents[-1].model_dump())
+        if self.log:
+            a = state.agents[-1]
+            self.log(f"  {a.role:26} {a.status:9} {a.steps:3} steps  ${a.cost_usd:.4f}")
         return result
 
     def _escalate(self, state: RunState, reason: str) -> None:
@@ -385,6 +389,15 @@ class Orchestrator:
     def _save(self, state: RunState, kind: str, data: dict[str, Any]) -> None:
         self.store.save(state.run_id, state.task.id, state.stage.value, state.cost_usd, state)
         self.store.event(state.run_id, state.stage.value, kind, data)
+        if not self.log:
+            return
+        if kind == "stage_done":
+            done = data["stage"]
+            gate = state.gates[-1] if state.gates and done.endswith("gate") else None
+            verdict = f"  [{'pass' if gate.passed else 'FAIL'}: {gate.summary}]" if gate else ""
+            self.log(f"{done} -> {data['next']}{verdict}")
+        elif kind == "checkpoint":
+            self.log(f"  checkpoint {data['n']} committed: {data['title']}")
 
     async def _notify(self, event: str, state: RunState) -> None:
         if self.observer:

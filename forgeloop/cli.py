@@ -95,9 +95,14 @@ def run(
         await _require_docker()
         tracer = Tracer(RUNS / "trace.sqlite")
         client = _client(max_usd * 1.1, tracer)
-        orch = Orchestrator(client, RunStore(), tracer=tracer, approver=_approve_interactively, runs_dir=RUNS)
+        orch = Orchestrator(
+            client, RunStore(), tracer=tracer, approver=_approve_interactively, runs_dir=RUNS, log=typer.echo
+        )
         try:
-            return await orch.run(orch.new_run(task, repo, pipeline))
+            state = orch.new_run(task, repo, pipeline)
+            typer.echo(f"ticket: {task.title}")
+            typer.echo(f"run {state.run_id}  config={config}  implementer={model}  reviewer={reviewer_model}\n")
+            return await orch.run(state)
         finally:
             await client.aclose()
 
@@ -112,7 +117,9 @@ def resume(run_id: str, max_usd: Annotated[float, typer.Option()] = 1.0) -> None
         await _require_docker()
         tracer = Tracer(RUNS / "trace.sqlite")
         client = _client(max_usd, tracer)
-        orch = Orchestrator(client, RunStore(), tracer=tracer, approver=_approve_interactively, runs_dir=RUNS)
+        orch = Orchestrator(
+            client, RunStore(), tracer=tracer, approver=_approve_interactively, runs_dir=RUNS, log=typer.echo
+        )
         try:
             state = orch.load(run_id)
             typer.echo(f"resuming {run_id} at {state.stage.value}")
