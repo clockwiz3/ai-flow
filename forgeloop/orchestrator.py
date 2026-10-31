@@ -129,7 +129,7 @@ class Orchestrator:
         self, task: Task, repo: Path, config: PipelineConfig, *, setup: Path | None = None, run_id: str | None = None
     ) -> RunState:
         run_id = run_id or f"{task.id}-{uuid.uuid4().hex[:8]}"
-        ws = workspace.prepare(repo, self.runs_dir / run_id / "workspace", f"forgeloop/{run_id}", setup=setup)
+        ws = workspace.prepare(repo, self.runs_dir / run_id / "workspace", f"forgeloop/{task.id[:40]}", setup=setup)
         state = RunState(run_id=run_id, task=task, config=config, workspace=str(ws))
         state.stage = Stage.PLAN if config.plan else Stage.IMPLEMENT
         self._save(state, "created", {"task": task.id, "config": config.model_dump()})
