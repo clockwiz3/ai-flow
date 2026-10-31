@@ -1,0 +1,36 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  checks:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+      - run: uv sync --locked
+      - run: uv run ruff check
+      - run: uv run ruff format --check
+      - run: uv run mypy
+      # includes the real-container isolation tests: no network, no secrets, read-only .git, timeouts
+      - run: uv run pytest -q
+
+  bench:
+    # the polygon itself must stay green: its own tests and lint
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: bench/bench-repo
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install "fastapi==0.115.*" "pydantic==2.*" "httpx==0.27.*" "pytest==8.*" "ruff==0.7.*"
+      - run: pytest -q
+      - run: ruff check .
