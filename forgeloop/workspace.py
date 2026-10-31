@@ -2,12 +2,29 @@
 
 from __future__ import annotations
 
+import os
 import shutil
+import stat
 import subprocess
 from pathlib import Path
+from typing import Any
 
 EXCLUDE = (".git", ".env", "hidden", "__pycache__", ".pytest_cache", ".ruff_cache", ".mypy_cache", ".venv")
 GIT_IDENTITY = ["-c", "user.name=forgeloop", "-c", "user.email=forgeloop@localhost", "-c", "commit.gpgsign=false"]
+
+
+def remove(path: Path) -> None:
+    """rmtree that also works past the 260-character limit on Windows and on read-only git objects."""
+    target = str(path.resolve())
+    if os.name == "nt" and not target.startswith("\\\\?\\"):
+        target = "\\\\?\\" + target
+
+    def unlock(func: Any, p: str, _: Any) -> None:
+        os.chmod(p, stat.S_IWRITE)
+        func(p)
+
+    if os.path.exists(target):
+        shutil.rmtree(target, onexc=unlock)
 
 
 def git(ws: Path, *args: str) -> str:

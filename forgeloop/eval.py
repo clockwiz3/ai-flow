@@ -8,7 +8,6 @@ from __future__ import annotations
 
 import asyncio
 import json
-import shutil
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -99,8 +98,8 @@ async def run_one(
     settings: EvalSettings,
     work_root: Path,
 ) -> RunRecord:
-    run_id = f"{eval_id}-{task.id}-{config}-{repeat}"
-    shutil.rmtree(work_root / run_id, ignore_errors=True)  # leftovers of an interrupted attempt
+    run_id = f"{task.id}-{config}-{repeat}"  # the eval directory already namespaces it
+    workspace.remove(work_root / run_id)  # leftovers of an interrupted attempt
     timeline: list[Checkpoint] = []
 
     async def observe(event: str, state: RunState) -> None:
@@ -131,7 +130,7 @@ async def run_one(
     else:
         passed = delivered and bool(hidden)
     patch = workspace.diff(state.ws)
-    shutil.rmtree(work_root / run_id, ignore_errors=True)
+    workspace.remove(work_root / run_id)
     return RunRecord(
         eval_id=eval_id,
         task_id=task.id,
