@@ -103,6 +103,7 @@ class LLMClient:
         temperature: float = 0.0,
         max_tokens: int = 4096,
         variant: int = 0,  # separate cache entries for repeated sampling of the same conversation
+        reasoning_effort: str | None = None,  # low / medium / high for reasoning models; None = provider default
         name: str = "llm",
     ) -> Response:
         system_blocks = [TextBlock(text=system)] if isinstance(system, str) else list(system or [])
@@ -117,6 +118,7 @@ class LLMClient:
                 "temperature": temperature,
                 "max_tokens": max_tokens,
                 "variant": variant,
+                "reasoning_effort": reasoning_effort,
             }
         )
         if self.cache and self.mode is not CacheMode.LIVE:
@@ -141,6 +143,8 @@ class LLMClient:
             }
             if tools:
                 payload["tools"] = openrouter.tools_to_wire(tools)
+            if reasoning_effort:
+                payload["reasoning"] = {"effort": reasoning_effort}
             try:
                 body, latency = await self._post(payload)
             except BudgetExceeded:

@@ -81,6 +81,7 @@ class AgentConfig:
     loop_hint_after: int = 3
     allow_escalation: bool = True
     finish: FinishTool | None = None  # structured end of the run (plans, review verdicts)
+    reasoning_effort: str | None = None
 
 
 @dataclass
@@ -172,6 +173,7 @@ class AgentLoop:
                     temperature=cfg.temperature,
                     max_tokens=cfg.max_output_tokens,
                     variant=cfg.variant,
+                    reasoning_effort=cfg.reasoning_effort,
                     name=f"{name}.step{step}",
                 )
             except BudgetExceeded:

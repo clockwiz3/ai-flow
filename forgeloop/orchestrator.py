@@ -59,6 +59,8 @@ class PipelineConfig(BaseModel):
     max_usd_per_agent: float = 0.40
     max_usd_per_run: float = 1.00
     max_steps: int = 40
+    reviewer_max_steps: int = 15
+    reviewer_reasoning: str | None = "low"  # reasoning models otherwise spend the output budget thinking
     temperature: float = 0.2
     variant: int = 0
 
@@ -272,6 +274,7 @@ class Orchestrator:
             state, sandbox, role="reviewer", model=cfg.reviewer_model, system=reviewer.SYSTEM,
             task=reviewer.task_prompt(state.task.ticket, state.plan.render() if state.plan else None, diff[-60_000:]),
             read_only=True, finish=reviewer.FINISH, allow_escalation=False,
+            max_steps=cfg.reviewer_max_steps, reasoning_effort=cfg.reviewer_reasoning,
         )  # fmt: skip
         if result.status != "done" or result.output is None:
             state.gates.append(GateResult(gate="review", passed=False, summary=f"reviewer failed: {result.status}"))
@@ -332,6 +335,8 @@ class Orchestrator:
         read_only: bool = False,
         finish: FinishTool | None = None,
         allow_escalation: bool = True,
+        max_steps: int | None = None,
+        reasoning_effort: str | None = None,
     ) -> AgentResult:
         cfg = state.config
         toolbox = default_toolbox(Workspace(state.ws), sandbox)
@@ -345,8 +350,9 @@ class Orchestrator:
                 model=model,
                 system=system,
                 max_usd=min(cfg.max_usd_per_agent, remaining),
-                max_steps=cfg.max_steps,
+                max_steps=max_steps or cfg.max_steps,
                 temperature=cfg.temperature,
+                reasoning_effort=reasoning_effort,
                 variant=cfg.variant,
                 allow_escalation=allow_escalation,
                 finish=finish,
