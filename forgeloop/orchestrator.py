@@ -279,6 +279,7 @@ class Orchestrator:
             return
         review = Review.model_validate(result.output)
         state.reviews.append(review)
+        await self._notify("reviewed", state)
         approved = review.verdict == "approve"
         state.gates.append(
             GateResult(

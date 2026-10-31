@@ -50,3 +50,28 @@ def test_summary_separates_solvable_and_ambiguous() -> None:
     assert "| 3 | 50% | 100% | 0% |" in baseline_row
     assert table.index("| baseline") < table.index("| full")
     assert "| b | bug | easy | 0/1 (done) | 1/1 |" in per_task_table(records)
+
+
+def test_gate_contribution_is_read_from_the_hidden_test_timeline() -> None:
+    from forgeloop.eval import Checkpoint
+    from forgeloop.report import gates_table
+
+    def tl(*events: tuple[str, bool]) -> list[Checkpoint]:
+        return [Checkpoint(event=e, hidden_passed=p) for e, p in events]
+
+    records = [
+        # test gate turned a failing implementation into a passing one; reviewer approved
+        _rec("a", "full", True, test_rounds=1, timeline=tl(("implemented", False), ("test_fix", True),
+             ("reviewed:approve", True), ("final", True))),
+        # reviewer caught a real defect and the fix made it pass
+        _rec("b", "full", True, review_rounds=1, timeline=tl(("implemented", False),
+             ("reviewed:request_changes", False), ("review_fix", True), ("reviewed:approve", True), ("final", True))),
+        # reviewer complained about working code and the "fix" broke it; then approved the broken result
+        _rec("c", "full", False, review_rounds=1, timeline=tl(("implemented", True),
+             ("reviewed:request_changes", True), ("review_fix", False), ("reviewed:approve", False),
+             ("final", False))),
+        # working code escalated
+        _rec("d", "full", False, status="escalated", hidden_passed=True, timeline=tl(("final", True))),
+    ]  # fmt: skip
+    row = gates_table(records).splitlines()[-1]
+    assert row.startswith("| full | 1 | 1 | 1 / 1 | 1 | 1 | 1 |"), row
