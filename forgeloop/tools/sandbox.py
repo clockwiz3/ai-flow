@@ -12,7 +12,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol
 
-DEFAULT_IMAGE = "forgeloop-sandbox:0.1"
+DEFAULT_IMAGE = "forgeloop-sandbox:0.2"
 DOCKERFILE = Path(__file__).resolve().parents[2] / "sandbox" / "Dockerfile"
 WORKDIR = "/work"
 

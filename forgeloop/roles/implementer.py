@@ -25,3 +25,23 @@ Rules:
 
 def task_prompt(ticket: str) -> str:
     return f"Ticket:\n\n{ticket.strip()}\n"
+
+
+def checkpoint_prompt(ticket: str, number: int, total: int, title: str, steps: list[str], done_when: str) -> str:
+    bullet_steps = "\n".join(f"- {s}" for s in steps)
+    return (
+        f"Ticket:\n\n{ticket.strip()}\n\n"
+        f"The plan for this ticket is in your context. Earlier checkpoints are already done and committed.\n"
+        f"Now implement checkpoint {number} of {total}: {title}\n{bullet_steps}\n"
+        f"Done when: {done_when}\n\n"
+        "Work only on this checkpoint (later ones come next). Run the relevant tests before you finish."
+    )
+
+
+def fix_prompt(ticket: str, source: str, feedback: str) -> str:
+    return (
+        f"Ticket:\n\n{ticket.strip()}\n\n"
+        f"The change for this ticket is implemented in the working tree, but the {source} found problems:\n\n"
+        f"{feedback.strip()}\n\n"
+        "Fix them. Change only what is needed, keep the ticket's requirements, and rerun the tests."
+    )

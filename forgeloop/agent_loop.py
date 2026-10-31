@@ -8,8 +8,9 @@ from __future__ import annotations
 
 import json
 import time
+from collections.abc import Callable
 from dataclasses import dataclass, field
-from typing import Literal
+from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
@@ -45,6 +46,17 @@ class AskHumanArgs(BaseModel):
     question: str = Field(description="What is unclear and what you need decided. Ask only when truly blocked.")
 
 
+FINISH_NUDGE = "When you are done, submit the result by calling {name}. Do not answer in plain text."
+
+
+@dataclass(frozen=True)
+class FinishTool:
+    """A tool whose call ends the run and carries its structured result. `validate` returns an error or None."""
+
+    spec: ToolSpec
+    validate: Callable[[dict[str, Any]], str | None]
+
+
 ASK_HUMAN_SPEC = ToolSpec(
     name=ASK_HUMAN,
     description="Stop and escalate to a human when the ticket is ambiguous or contradictory. Do not guess instead.",
@@ -58,7 +70,7 @@ class AgentConfig:
     system: str
     fallback_models: list[str] = field(default_factory=list)
     max_steps: int = 30
-    max_tokens: int = 400_000  # prompt + completion over the whole run
+    max_tokens: int = 300_000  # fresh tokens over the whole run: uncached prompt + completion
     max_usd: float = 0.50
     max_output_tokens: int = 4096
     temperature: float = 0.0
@@ -68,6 +80,7 @@ class AgentConfig:
     keep_recent: int = 6  # messages kept verbatim when compacting
     loop_hint_after: int = 3
     allow_escalation: bool = True
+    finish: FinishTool | None = None  # structured end of the run (plans, review verdicts)
 
 
 @dataclass
@@ -82,6 +95,7 @@ class AgentResult:
     error: str | None = None
     compactions: int = 0
     loop_hints: int = 0
+    output: dict[str, Any] | None = None  # arguments of the finish tool call
 
     @property
     def ok(self) -> bool:
@@ -115,6 +129,9 @@ class AgentLoop:
         if context:
             system.append(TextBlock(text=context, cache=True))
         specs = self.toolbox.specs + ([ASK_HUMAN_SPEC] if cfg.allow_escalation else [])
+        if cfg.finish:
+            specs.append(cfg.finish.spec)
+        nudged = False
         messages: list[Message] = [Message.user(task)]
         usage, cost = Usage(), 0.0
         last_call: str | None = None
@@ -129,7 +146,7 @@ class AgentLoop:
 
         for step in range(1, cfg.max_steps + 1):
             result.steps = step
-            if usage.input_tokens + usage.output_tokens >= cfg.max_tokens:
+            if usage.input_tokens - usage.cache_read_tokens + usage.output_tokens >= cfg.max_tokens:
                 return finish("max_tokens")
             if cost >= cfg.max_usd:
                 return finish("max_usd")
@@ -172,6 +189,12 @@ class AgentLoop:
                 if response.stop_reason == "max_tokens":
                     messages.append(Message.user("Your reply was cut off. Continue, using tools for any edits."))
                     continue
+                if cfg.finish and not nudged:
+                    nudged = True
+                    messages.append(Message.user(FINISH_NUDGE.format(name=cfg.finish.spec.name)))
+                    continue
+                if cfg.finish:
+                    return finish("error", final_text=reply.text, error=f"ended without calling {cfg.finish.spec.name}")
                 return finish("done", final_text=reply.text)
 
             results: list[TextBlock | ToolUseBlock | ToolResultBlock] = []
@@ -179,6 +202,16 @@ class AgentLoop:
                 if call.name == ASK_HUMAN and cfg.allow_escalation:
                     question = str(call.input.get("question", "")).strip() or reply.text
                     return finish("escalated", final_text=reply.text, question=question)
+                if cfg.finish and call.name == cfg.finish.spec.name:
+                    problem = call.parse_error or cfg.finish.validate(call.input)
+                    if problem is None:
+                        return finish("done", final_text=reply.text, output=call.input)
+                    results.append(
+                        ToolResultBlock(
+                            tool_use_id=call.id, content=f"rejected: {problem}. Fix and resubmit.", is_error=True
+                        )
+                    )
+                    continue
                 output, is_error = await self._execute(call)
                 results.append(ToolResultBlock(tool_use_id=call.id, content=output, is_error=is_error))
 
