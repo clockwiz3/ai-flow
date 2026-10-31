@@ -38,9 +38,15 @@ def checkpoint_prompt(ticket: str, number: int, total: int, title: str, steps: l
     )
 
 
-def fix_prompt(ticket: str, source: str, feedback: str) -> str:
+def fix_prompt(ticket: str, source: str, feedback: str, *, previous_idle: bool = False) -> str:
+    idle = (
+        "Your previous fix attempt changed no files, so the problems are still there. Do not claim they are fixed: "
+        "read the failing code, edit it, and rerun the checks.\n\n"
+        if previous_idle
+        else ""
+    )
     return (
-        f"Ticket:\n\n{ticket.strip()}\n\n"
+        idle + f"Ticket:\n\n{ticket.strip()}\n\n"
         f"The change for this ticket is implemented in the working tree, but the {source} found problems:\n\n"
         f"{feedback.strip()}\n\n"
         "Fix them. Change only what is needed, keep the ticket's requirements, and rerun the tests."

@@ -67,7 +67,7 @@ class RunRecord(BaseModel):
 class EvalSettings:
     model: str
     reviewer_model: str = "z-ai/glm-5.3-flash"
-    planner_model: str | None = None  # defaults to the implementer model
+    planner_model: str = "anthropic/claude-haiku-5.5"  # fixed across tracks: only the implementer varies
     max_usd_per_run: float = 1.00
     max_usd_per_agent: float = 0.40
     max_steps: int = 40
@@ -77,7 +77,7 @@ class EvalSettings:
         return PipelineConfig.preset(
             config,
             implementer_model=self.model,
-            planner_model=self.planner_model or self.model,
+            planner_model=self.planner_model,
             reviewer_model=self.reviewer_model,
             max_usd_per_run=self.max_usd_per_run,
             max_usd_per_agent=self.max_usd_per_agent,

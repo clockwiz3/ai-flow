@@ -59,7 +59,7 @@ class PipelineConfig(BaseModel):
     max_usd_per_agent: float = 0.40
     max_usd_per_run: float = 1.00
     max_steps: int = 40
-    reviewer_max_steps: int = 15
+    reviewer_max_steps: int = 20
     reviewer_reasoning: str | None = "low"  # reasoning models otherwise spend the output budget thinking
     temperature: float = 0.2
     variant: int = 0
@@ -104,6 +104,8 @@ class RunState(BaseModel):
     reviews: list[Review] = []
     cost_usd: float = 0.0
     escalation: str | None = None  # why a human is needed
+    idle_fixes: int = 0  # fix rounds that changed nothing
+    last_fix_idle: bool = False
     question: str | None = None  # an agent's question for an ambiguous ticket
 
     @property
@@ -249,6 +251,9 @@ class Orchestrator:
         return Stage.DELIVER
 
     async def _test_gate(self, state: RunState, sandbox: Sandbox) -> None:
+        # Deterministic autofix first: lint that a tool can fix is not worth a model round.
+        await sandbox.exec(["ruff", "check", "--fix", "--quiet", "."], 120)
+        workspace.commit_all(state.ws, f"forgeloop: {state.task.id} ruff --fix")
         gate = await run_test_gate(sandbox, state.ws)
         gate.data["round"] = state.test_rounds
         state.gates.append(gate)
@@ -315,9 +320,11 @@ class Orchestrator:
         result = await self._agent(
             state, sandbox, role=f"implementer.fix-{source.replace(' ', '-')}", model=cfg.implementer_model,
             system=implementer.SYSTEM, context=state.plan.render() if state.plan else None,
-            task=implementer.fix_prompt(state.task.ticket, source, feedback),
+            task=implementer.fix_prompt(state.task.ticket, source, feedback, previous_idle=state.last_fix_idle),
         )  # fmt: skip
-        workspace.commit_all(state.ws, f"forgeloop: {state.task.id} fix after {source}")
+        committed = workspace.commit_all(state.ws, f"forgeloop: {state.task.id} fix after {source}")
+        state.last_fix_idle = committed is None
+        state.idle_fixes += int(committed is None)
         if result.status == "escalated":
             state.question = result.question
             self._escalate(state, f"the implementer needs clarification while fixing {source} findings")

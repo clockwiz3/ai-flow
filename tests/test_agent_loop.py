@@ -159,3 +159,15 @@ def test_agent_run_is_traced(repo: Path, tmp_path: Path) -> None:
         run(repo, Script([tool("read_file", path="app/main.py"), text("ok")]), tracer=tracer)
     kinds = [s["kind"] for s in tracer.spans("r1")]
     assert kinds.count("llm") == 2 and kinds.count("tool") == 1 and "agent" in kinds
+
+
+def test_finish_tool_gets_a_deadline_reminder(repo: Path) -> None:
+    from forgeloop.agent_loop import FinishTool
+    from llmcore import ToolSpec
+
+    finish = FinishTool(ToolSpec(name="submit", description="d", input_schema={"type": "object"}), lambda _: None)
+    script = Script([tool("read_file", path="app/main.py", start_line=i) for i in range(1, 4)] + [tool("submit")])
+    result = run(repo, script, max_steps=5, finish=finish)
+    assert result.status == "done" and result.output == {}
+    reminded = json.dumps(script.requests[2]["messages"][-1])
+    assert "steps left" in reminded and "submit" in reminded

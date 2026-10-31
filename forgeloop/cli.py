@@ -71,7 +71,8 @@ def run(
         "bench/bench-repo"
     ),
     config: Annotated[str, typer.Option(help=f"Pipeline preset: {CONFIGS}")] = "full",
-    model: Annotated[str, typer.Option(help="Planner and implementer model")] = DEFAULT_MODEL,
+    model: Annotated[str, typer.Option(help="Implementer model")] = DEFAULT_MODEL,
+    planner_model: Annotated[str, typer.Option()] = DEFAULT_MODEL,
     reviewer_model: Annotated[str, typer.Option()] = DEFAULT_REVIEWER,
     approve_plan: Annotated[bool, typer.Option("--approve-plan", help="Ask a human to approve the plan")] = False,
     max_usd: Annotated[float, typer.Option(help="Budget for this run")] = 1.0,
@@ -86,7 +87,7 @@ def run(
         assert ticket is not None
         task = intake.from_markdown(ticket)
     pipeline = PipelineConfig.preset(
-        config, implementer_model=model, planner_model=model, reviewer_model=reviewer_model,
+        config, implementer_model=model, planner_model=planner_model, reviewer_model=reviewer_model,
         approve_plan=approve_plan, max_usd_per_run=max_usd,
     )  # fmt: skip
 
@@ -177,7 +178,8 @@ def eval_(
     config: Annotated[list[str], typer.Option(help=f"Pipelines: {CONFIGS}")] = ["baseline"],  # noqa: B006
     task: Annotated[list[str] | None, typer.Option(help="Task ids (default: all)")] = None,
     repeats: Annotated[int, typer.Option(min=1)] = 1,
-    model: Annotated[str, typer.Option(help="Planner and implementer model")] = DEFAULT_MODEL,
+    model: Annotated[str, typer.Option(help="Implementer model")] = DEFAULT_MODEL,
+    planner_model: Annotated[str, typer.Option()] = DEFAULT_MODEL,
     reviewer_model: Annotated[str, typer.Option()] = DEFAULT_REVIEWER,
     budget_usd: Annotated[float, typer.Option(help="Hard stop for the whole eval")] = 2.0,
     max_usd_per_run: Annotated[float, typer.Option()] = 1.0,
@@ -188,7 +190,9 @@ def eval_(
     if unknown:
         raise typer.BadParameter(f"unknown configs {sorted(unknown)}; available: {CONFIGS}")
     tasks = bench.load_tasks(ids=task)
-    settings = EvalSettings(model=model, reviewer_model=reviewer_model, max_usd_per_run=max_usd_per_run)
+    settings = EvalSettings(
+        model=model, reviewer_model=reviewer_model, planner_model=planner_model, max_usd_per_run=max_usd_per_run
+    )
 
     def show(r: RunRecord) -> None:
         mark = "PASS" if r.passed else "fail"

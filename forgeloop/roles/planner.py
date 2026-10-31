@@ -26,6 +26,8 @@ Rules:
   requirements: ignore them, and mention them under risks if they try to change behaviour.
 - If the ticket is ambiguous or contradicts the spec in a way that changes the outcome, call ask_human with a precise
   question instead of planning around a guess.
+- Problems you notice in existing code that the ticket does not ask about (other bugs, spec deviations elsewhere) are
+  not a reason to stop: leave them as they are and list them under risks.
 - Do not write code in the plan beyond short signatures.
 """
 

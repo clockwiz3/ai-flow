@@ -47,6 +47,7 @@ class AskHumanArgs(BaseModel):
 
 
 FINISH_NUDGE = "When you are done, submit the result by calling {name}. Do not answer in plain text."
+FINISH_DEADLINE = "You have {left} steps left. Stop investigating and submit your result with {name} now."
 
 
 @dataclass(frozen=True)
@@ -151,6 +152,9 @@ class AgentLoop:
                 return finish("max_tokens")
             if cost >= cfg.max_usd:
                 return finish("max_usd")
+            if cfg.finish and step == cfg.max_steps - 2 and messages[-1].role == "user":
+                deadline = TextBlock(text=FINISH_DEADLINE.format(left=3, name=cfg.finish.spec.name))
+                messages[-1] = messages[-1].model_copy(update={"content": [*messages[-1].content, deadline]})
             if estimate_tokens(messages) > cfg.context_tokens:
                 try:
                     messages, extra_usage, extra_cost = await self._compact(system, messages, name)

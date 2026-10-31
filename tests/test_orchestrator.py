@@ -284,3 +284,13 @@ def test_markdown_intake(tmp_path: Path) -> None:
     task = from_markdown(ticket)
     assert task.id == "bug-9" and task.title == "Search ignores case"
     assert task.ticket.startswith("# Search ignores case\n\nSearching")
+
+
+def test_ruff_autofix_runs_before_the_test_gate_and_idle_fixes_are_called_out(tmp_path: Path, repo: Path) -> None:
+    lazy_fix = [say("fixed")]  # claims success without touching a file
+    real_fix = [call("write_file", path="app/fix.py", content="Y = 1"), say("fixed for real")]
+    models = Models({"implementer": [*implementer_edits(1), *lazy_fix, *real_fix]})
+    config = PipelineConfig.preset("test-gate", plan=False)
+    state, _, sandbox = run_pipeline(tmp_path, repo, models, config, pytest_results=[1, 1, 0])
+    assert state.stage == Stage.DELIVERED and state.test_rounds == 2 and state.idle_fixes == 1
+    assert ["ruff", "check", "--fix", "--quiet", "."] in sandbox.commands
