@@ -54,6 +54,7 @@ class PipelineConfig(BaseModel):
     planner_model: str = "anthropic/claude-haiku-5.5"
     reviewer_model: str = "z-ai/glm-5.3-flash"  # a different model than the implementer
     max_plan_attempts: int = 2
+    max_checkpoint_attempts: int = 2
     max_test_rounds: int = 3
     max_review_rounds: int = 2
     max_usd_per_agent: float = 0.40
@@ -97,6 +98,8 @@ class RunState(BaseModel):
     plan_attempts: int = 0
     plan_feedback: str | None = None
     checkpoints_done: int = 0
+    checkpoint_attempts: int = 0  # attempts at the current checkpoint
+    unfinished_status: str | None = None  # how the previous attempt at the current checkpoint ended
     test_rounds: int = 0
     review_rounds: int = 0
     gates: list[GateResult] = []
@@ -226,18 +229,35 @@ class Orchestrator:
             while state.checkpoints_done < len(checkpoints):
                 n = state.checkpoints_done
                 cp = checkpoints[n]
+                state.checkpoint_attempts += 1
+                retry = ".retry" if state.checkpoint_attempts > 1 else ""
                 result = await self._agent(
-                    state, sandbox, role=f"implementer.cp{n + 1}", model=cfg.implementer_model,
+                    state, sandbox, role=f"implementer.cp{n + 1}{retry}", model=cfg.implementer_model,
                     system=implementer.SYSTEM, context=plan_text,
                     task=implementer.checkpoint_prompt(state.task.ticket, n + 1, len(checkpoints), cp.title,
-                                                       cp.steps, cp.done_when),
+                                                       cp.steps, cp.done_when, unfinished=state.unfinished_status),
                 )  # fmt: skip
                 if result.status == "escalated":
                     state.question = result.question
                     self._escalate(state, f"the implementer needs clarification at checkpoint {n + 1}")
                     return
                 workspace.commit_all(state.ws, f"forgeloop: {state.task.id} checkpoint {n + 1}: {cp.title}")
+                if result.status != "done":
+                    # The agent stopped on a limit: the checkpoint is not done, and the next one must not be told it is.
+                    if state.checkpoint_attempts >= cfg.max_checkpoint_attempts:
+                        self._escalate(
+                            state, f"checkpoint {n + 1} did not finish in {state.checkpoint_attempts} attempts "
+                                   f"(last: {result.status})"
+                        )  # fmt: skip
+                        return
+                    state.unfinished_status = result.status
+                    self._save(state, "checkpoint_unfinished", {"n": n + 1, "status": result.status})
+                    if state.cost_usd >= cfg.max_usd_per_run:
+                        return  # the run loop escalates on the budget
+                    continue
                 state.checkpoints_done += 1
+                state.checkpoint_attempts = 0
+                state.unfinished_status = None
                 self._save(state, "checkpoint", {"n": n + 1, "title": cp.title, "status": result.status})
                 if state.cost_usd >= cfg.max_usd_per_run:
                     break  # the run loop escalates on the budget before the next stage

@@ -27,12 +27,28 @@ def task_prompt(ticket: str) -> str:
     return f"Ticket:\n\n{ticket.strip()}\n"
 
 
-def checkpoint_prompt(ticket: str, number: int, total: int, title: str, steps: list[str], done_when: str) -> str:
+def checkpoint_prompt(
+    ticket: str,
+    number: int,
+    total: int,
+    title: str,
+    steps: list[str],
+    done_when: str,
+    *,
+    unfinished: str | None = None,
+) -> str:
     bullet_steps = "\n".join(f"- {s}" for s in steps)
+    resume = (
+        f"A previous attempt at this checkpoint stopped before finishing ({unfinished}); its partial changes are "
+        "committed. Check the current state of the files first, then complete the checkpoint.\n"
+        if unfinished
+        else ""
+    )
     return (
         f"Ticket:\n\n{ticket.strip()}\n\n"
-        f"The plan for this ticket is in your context. Earlier checkpoints are already done and committed.\n"
-        f"Now implement checkpoint {number} of {total}: {title}\n{bullet_steps}\n"
+        "The plan for this ticket is in your context. Earlier checkpoints are already done and committed.\n"
+        + resume
+        + f"Now implement checkpoint {number} of {total}: {title}\n{bullet_steps}\n"
         f"Done when: {done_when}\n\n"
         "Work only on this checkpoint (later ones come next). Run the relevant tests before you finish."
     )

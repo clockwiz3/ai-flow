@@ -294,3 +294,28 @@ def test_ruff_autofix_runs_before_the_test_gate_and_idle_fixes_are_called_out(tm
     state, _, sandbox = run_pipeline(tmp_path, repo, models, config, pytest_results=[1, 1, 0])
     assert state.stage == Stage.DELIVERED and state.test_rounds == 2 and state.idle_fixes == 1
     assert ["ruff", "check", "--fix", "--quiet", "."] in sandbox.commands
+
+
+def test_unfinished_checkpoint_is_retried_not_skipped(tmp_path: Path, repo: Path) -> None:
+    looping = [call("list_dir", path=".")] * 4  # identical calls: the loop detector stops this attempt
+    models = Models(
+        {
+            "planner": [call("submit_plan", **PLAN)],
+            "implementer": [*looping, *implementer_edits(2)],
+        }
+    )
+    state, _, _ = run_pipeline(tmp_path, repo, models, PipelineConfig.preset("plan"))
+    assert state.stage == Stage.DELIVERED and state.checkpoints_done == 2
+    assert [(a.role, a.status) for a in state.agents[1:]] == [
+        ("implementer.cp1", "loop"),
+        ("implementer.cp1.retry", "done"),
+        ("implementer.cp2", "done"),
+    ]
+
+
+def test_checkpoint_that_never_finishes_escalates(tmp_path: Path, repo: Path) -> None:
+    looping = [call("list_dir", path=".")] * 4
+    models = Models({"planner": [call("submit_plan", **PLAN)], "implementer": looping * 2})
+    state, _, _ = run_pipeline(tmp_path, repo, models, PipelineConfig.preset("full"))
+    assert state.stage == Stage.ESCALATED and "checkpoint 1 did not finish in 2 attempts" in (state.escalation or "")
+    assert state.checkpoints_done == 0 and models.calls["reviewer"] == 0
