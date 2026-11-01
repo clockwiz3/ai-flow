@@ -300,7 +300,7 @@ async function runPage(runId) {
 
 function planMarkdown(plan) {
   const lines = [plan.summary, "", "**Files**", ...plan.files.map((f) => `- ${f.action} \`${f.path}\` — ${f.why}`), "", "**Checkpoints**"];
-  plan.checkpoints.forEach((c, i) => lines.push(`${i + 1}. **${c.title}** — ${c.steps.join("; ")} _(done when: ${c.done_when})_`));
+  plan.checkpoints.forEach((c, i) => lines.push(`${i + 1}. **${c.title}** — ${c.steps.join("; ")} (done when: ${c.done_when})`));
   lines.push("", "**Acceptance**", ...plan.acceptance.map((a) => `- ${a}`));
   if (plan.risks?.length) lines.push("", "**Risks**", ...plan.risks.map((r) => `- ${r}`));
   return lines.join("\n");
@@ -371,6 +371,7 @@ function kpi(value, label) {
 async function route() {
   cleanup.forEach((fn) => fn());
   cleanup = [];
+  window.scrollTo(0, 0);
   const [, page, arg] = location.hash.split("/");
   document.querySelectorAll("[data-nav]").forEach((a) => a.classList.toggle("active", a.dataset.nav === (page || "runs") || (page === "run" && a.dataset.nav === "runs") || (page === "eval" && a.dataset.nav === "evals")));
   try {

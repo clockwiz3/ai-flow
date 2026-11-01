@@ -56,6 +56,31 @@ This writes `runs/<run_id>/PR.md` ([example](docs/example-PR.md)) and the work b
 - `forgeloop validate`: checks that every bench task's hidden tests fail without the fix and pass with the reference, 3 times.
 - `forgeloop eval --id X --config baseline --config full`, `forgeloop report --id X`.
 
+## Web UI
+
+```bash
+uv run forgeloop serve
+```
+
+Opens on <http://127.0.0.1:8765>. From the browser you can:
+
+- start a run from a bench task, your own ticket or a GitHub issue, and pick the configuration, models and budget;
+- follow it live: the stage stepper and an event log streamed over SSE;
+- approve or reject the plan before any code is written;
+- read the gate feedback, per-agent cost, the PR description, the diff and the trace;
+- resume or cancel a run;
+- browse eval results as a dashboard.
+
+![a run in the web UI](docs/ui-run.jpg)
+
+The server listens on localhost only and takes the same care as the agents:
+
+- it rejects foreign `Host` headers (DNS rebinding);
+- state-changing requests need a custom header (CSRF);
+- a strict CSP is set;
+- ticket and issue text is rendered as text, never as HTML;
+- the API key stays on the server.
+
 ## Results
 
 **Bench:** 20 tickets for a ~1,500-line FastAPI rental service: 8 bug fixes, 8 features, 4 refactors.
@@ -150,6 +175,7 @@ forgeloop/
   gates/            plan gate, test gate (tests, ruff, bandit, OSV)
   tools/            file tools with path policy, command tools, Docker sandbox
   store.py          SQLite: runs, state checkpoints, events
+  web/              local web UI: FastAPI + a build-free frontend
   eval.py, report.py, bench.py, grading.py, cli.py
 llmcore/            OpenRouter client: tool use, prompt caching, retries, fallback,
                     response cache, prices, token accounting, SQLite tracing
