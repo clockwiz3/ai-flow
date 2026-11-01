@@ -141,3 +141,57 @@ def delivery_table(records: list[RunRecord]) -> str:
         per_working = f"${sum(r.cost_usd for r in rs) / working:.3f}" if working else "-"
         lines.append(f"| {c} | {len(rs)} | {working} | {broken} | {escalated} | {precision} | {per_working} |")
     return "\n".join(lines)
+
+
+def overview(records: list[RunRecord]) -> dict[str, object]:
+    """Everything the tables show, as data: per configuration and per task (for the web dashboard)."""
+    by_config: dict[str, list[RunRecord]] = defaultdict(list)
+    for r in records:
+        by_config[r.config].append(r)
+    configs = sorted(by_config, key=lambda c: (CONFIG_ORDER.index(c) if c in CONFIG_ORDER else 99, c))
+    rows: list[dict[str, object]] = []
+    for c in configs:
+        rs = by_config[c]
+        solvable = [r for r in rs if r.expected == "solve"]
+        ambiguous = [r for r in rs if r.expected == "escalate"]
+        working = sum(r.status == "delivered" and bool(r.hidden_passed) for r in solvable)
+        broken = sum(r.status == "delivered" and not r.hidden_passed for r in solvable)
+        escalated = sum(r.status == "escalated" for r in solvable)
+        gates: dict[str, int] = defaultdict(int)
+        for r in solvable:
+            for k, v in _gate_counts(r).items():
+                gates[k] += v
+        total = sum(r.cost_usd for r in rs)
+        rows.append(
+            {
+                "config": c,
+                "runs": len(rs),
+                "solvable": len(solvable),
+                "pass_at_1": mean(r.passed for r in solvable) if solvable else None,
+                "ambiguous_asked": sum(r.passed for r in ambiguous),
+                "ambiguous": len(ambiguous),
+                "working": working,
+                "broken": broken,
+                "escalated": escalated,
+                "precision": working / (working + broken) if working + broken else None,
+                "usd_total": total,
+                "usd_per_run": total / len(rs),
+                "usd_per_working": sum(r.cost_usd for r in solvable) / working if working else None,
+                "avg_steps": mean(r.steps for r in rs),
+                "gates": dict(gates),
+            }
+        )
+    tasks: dict[str, dict[str, object]] = {}
+    for r in sorted(records, key=lambda r: r.task_id):
+        t = tasks.setdefault(
+            r.task_id,
+            {"task_id": r.task_id, "kind": r.kind, "difficulty": r.difficulty, "expected": r.expected,
+             "tags": r.tags, "cells": {}},
+        )  # fmt: skip
+        cells = t["cells"]
+        assert isinstance(cells, dict)
+        cells.setdefault(r.config, []).append(
+            {"passed": r.passed, "status": r.status, "cost_usd": r.cost_usd, "error": r.error, "repeat": r.repeat}
+        )
+    model = records[0].model if records else ""
+    return {"model": model, "configs": rows, "tasks": list(tasks.values())}

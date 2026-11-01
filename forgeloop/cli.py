@@ -45,9 +45,9 @@ def _client(budget_usd: float, tracer: Tracer) -> LLMClient:
     return LLMClient(cache=ResponseCache(), meter=Meter(limit_usd=budget_usd), tracer=tracer, prices=PriceTable.load())
 
 
-def _approve_interactively(plan: Plan) -> bool:
+async def _approve_interactively(_: RunState, plan: Plan) -> bool:
     typer.echo(plan.render())
-    return typer.confirm("\nApprove this plan?", default=True)
+    return await asyncio.to_thread(typer.confirm, "\nApprove this plan?", default=True)
 
 
 def _print_outcome(state: RunState) -> None:
@@ -234,3 +234,24 @@ def report_(eval_id: Annotated[str, typer.Option("--id")]) -> None:
     typer.echo(report.gates_table(records))
     typer.echo("")
     typer.echo(report.per_task_table(records))
+
+
+@app.command()
+def serve(
+    port: Annotated[int, typer.Option()] = 8765,
+    budget_usd: Annotated[float, typer.Option(help="Hard stop for everything started from this server session")] = 5.0,
+) -> None:
+    """Local web UI: start tickets, watch runs live, approve plans, browse evals. Listens on 127.0.0.1 only."""
+    import os
+
+    import uvicorn
+
+    from forgeloop.web import create_app
+
+    load_dotenv()
+    asyncio.run(_require_docker())
+    tracer = Tracer(RUNS / "trace.sqlite")
+    client = _client(budget_usd, tracer)
+    web = create_app(client, runs_dir=RUNS, tracer=tracer, api_key=os.environ.get("OPENROUTER_API_KEY"))
+    typer.echo(f"ForgeLoop UI on http://127.0.0.1:{port}  (session budget ${budget_usd:.2f})")
+    uvicorn.run(web, host="127.0.0.1", port=port, log_level="warning")

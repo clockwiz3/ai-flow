@@ -117,7 +117,7 @@ class RunState(BaseModel):
 
 
 Observer = Callable[[str, RunState], Awaitable[None]]  # (event, state): eval hooks, e.g. grade after each gate
-Approver = Callable[[Plan], bool]
+Approver = Callable[[RunState, Plan], Awaitable[bool]]  # a human decision; may wait (CLI prompt, web button)
 
 
 @dataclass
@@ -206,7 +206,7 @@ class Orchestrator:
             else:
                 self._escalate(state, f"plan rejected by the plan gate: {gate.summary}")
             return
-        if state.config.approve_plan and (self.approver is None or not self.approver(state.plan)):
+        if state.config.approve_plan and not await self._approve(state):
             self._escalate(state, "plan rejected by a human")
             return
         state.stage = Stage.IMPLEMENT
@@ -418,6 +418,17 @@ class Orchestrator:
             self.log(f"{done} -> {data['next']}{verdict}")
         elif kind == "checkpoint":
             self.log(f"  checkpoint {data['n']} committed: {data['title']}")
+
+    async def _approve(self, state: RunState) -> bool:
+        assert state.plan is not None
+        if self.approver is None:
+            return False
+        self._save(state, "awaiting_approval", {"stage": state.stage.value})
+        if self.log:
+            self.log("  waiting for a human to approve the plan")
+        approved = await self.approver(state, state.plan)
+        self.store.event(state.run_id, state.stage.value, "plan_decision", {"approved": approved})
+        return approved
 
     async def _notify(self, event: str, state: RunState) -> None:
         if self.observer:
